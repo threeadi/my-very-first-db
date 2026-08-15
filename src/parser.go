@@ -55,6 +55,19 @@ type SelectStatement struct {
 	DBName  string
 	Table   string
 	Columns []string
+	Cons    Condition
+	Sort    Sort
+}
+
+type Condition struct {
+	Key string
+	Op  string
+	Val any
+}
+
+type Sort struct {
+	Key string
+	Dir string
 }
 
 func (SelectStatement) statementNode() {}
@@ -180,6 +193,20 @@ func (p *Parser) parseColumns() ([]ColumnDef, error) {
 		}
 		colType := p.Tokens[p.pos].Literal
 		p.pos++
+		pk := false
+		if p.pos < len(p.Tokens) && p.Tokens[p.pos].Type == KEYWORD && p.Tokens[p.pos].Literal == "primary" {
+			p.pos++
+			if p.pos < len(p.Tokens) && p.Tokens[p.pos].Type == KEYWORD && p.Tokens[p.pos].Literal == "key" {
+				pk = true
+				p.pos++
+			} else {
+				found := "EOF"
+				if p.pos < len(p.Tokens) {
+					found = p.Tokens[p.pos].Literal
+				}
+				return columns, fmt.Errorf("diharapkan 'key' setelah 'primary', tapi dapat: %s", found)
+			}
+		}
 
 		nullable := true
 		if p.pos < len(p.Tokens) && p.Tokens[p.pos].Type == KEYWORD && p.Tokens[p.pos].Literal == "not" {
@@ -216,11 +243,16 @@ func (p *Parser) parseColumns() ([]ColumnDef, error) {
 			return columns, fmt.Errorf("tipe kolom '%s' tidak valid", colType)
 		}
 
+		if pk && valueType != IntType {
+			return columns, fmt.Errorf("PRIMARY KEY hanya boleh bertipe integer")
+		}
+
 		columns = append(columns, ColumnDef{
 			Name:         colName,
 			ValueType:    valueType,
 			Nullable:     nullable,
 			DefaultValue: defaultValue,
+			Primary:      pk,
 		})
 
 		if p.pos >= len(p.Tokens) {
@@ -372,7 +404,7 @@ func (p *Parser) parseInsert() (Statement, error) {
 		token := p.Tokens[p.pos]
 		isNull := token.Type == KEYWORD && token.Literal == "null"
 		if token.Type != NUMBER && token.Type != STRING && !isNull {
-			return nil, fmt.Errorf("%w: value harus berupa string, number, atau null", ErrInvalidStatement)
+			return nil, fmt.Errorf("%w: value harus berupa string atau null", ErrInvalidStatement)
 		}
 
 		values = append(values, token.Literal)

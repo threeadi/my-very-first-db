@@ -151,9 +151,8 @@ func printResultSet(result ResultSet) {
 		widths[i] = len(col.Name)
 	}
 
-	// Perbesar lebar berdasarkan nilai terpanjang pada setiap kolom.
-	for _, row := range result.Rows {
-		for i, column := range row {
+	for _, record := range result.Records {
+		for i, column := range record {
 			if i >= len(widths) {
 				break
 			}
@@ -176,14 +175,14 @@ func printResultSet(result ResultSet) {
 
 	printSeparator(widths)
 
-	if len(result.Rows) == 0 {
+	if len(result.Records) == 0 {
 		fmt.Println("tidak ada data")
 		printSeparator(widths)
 		return
 	}
 
 	// Rows.
-	for _, row := range result.Rows {
+	for _, row := range result.Records {
 		fmt.Print("|")
 
 		for i := range result.Columns {

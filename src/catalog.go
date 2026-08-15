@@ -24,6 +24,7 @@ const (
 type ColumnDef struct {
 	Name         string    `json:"name"`
 	ValueType    ValueType `json:"value_type"`
+	Primary      bool      `json:"pk"`
 	Nullable     bool      `json:"nullable"`
 	DefaultValue any       `json:"default_value"`
 }
@@ -31,13 +32,6 @@ type ColumnDef struct {
 type TableDef struct {
 	Name    string      `json:"name"`
 	Columns []ColumnDef `json:"columns"`
-}
-
-// 15 bytes header for table file
-type TableHeader struct {
-	Magic    [4]byte
-	Version  uint8
-	Reserved [10]byte
 }
 
 type Database struct {

@@ -24,5 +24,6 @@ var (
 	ErrValueOutOfRange    = errors.New("value out of range")
 
 	ErrCorruptTableFile = errors.New("corrupt table file")
-	ErrEncodeFailed     = errors.New("failed to encode")
+	ErrPageWriteFailed  = errors.New("failed to write page")
+	ErrPageReadFailed   = errors.New("failed to read page")
 )

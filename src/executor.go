@@ -25,11 +25,11 @@ type Value struct {
 	Null  bool
 }
 
-type Row []Value
+type Record []Value
 
 type ResultSet struct {
 	Columns []ResultColumn
-	Rows    []Row
+	Records []Record
 }
 
 type ParsedValue struct {
@@ -92,32 +92,62 @@ func (x *Executor) CreateTable(stmt CreateTableStatement) error {
 		return ErrTableExists
 	}
 
+	pkFound := false
+	for _, col := range stmt.Columns {
+		if !pkFound && col.Primary {
+			pkFound = true
+			continue
+		}
+		if pkFound && col.Primary {
+			return errors.New("PRIMARY KEY hanya support 1")
+		}
+	}
+
+	if !pkFound {
+		return errors.New("table harus memiliki minimal 1 PK")
+	}
+
 	// 3. Executor MEMBUAT file table di folder database
 	filePath := filepath.Join(x.config.DataDirectory, fmt.Sprintf("/%s/%s.3tbl", stmt.DBName, stmt.Table))
-	file, err := os.Create(filePath)
+	pager, err := CreatePager(filePath)
+	if err != nil {
+		return err
+	}
+	defer pager.Close()
+
+	meta := MetaPage{
+		Magic:      [4]byte{'3', 'D', 'B', '1'},
+		Version:    1,
+		PageSize:   PageSize,
+		RootPageID: 1,
+		NextPageID: 2,
+	}
+
+	page := EncodeMetaPage(meta)
+
+	err = pager.WritePage(page)
 	if err != nil {
 		return err
 	}
 
-	var header TableHeader = TableHeader{
-		Magic:    [4]byte{'3', 'D', 'B', '1'},
-		Version:  1,
-		Reserved: [10]byte{},
-	}
-
-	buf := new(bytes.Buffer)
-
-	err = binary.Write(buf, binary.LittleEndian, header)
+	rootLeaf, err := pager.AllocatePage()
 	if err != nil {
 		return err
 	}
 
-	_, err = file.Write(buf.Bytes())
-	if err != nil {
-		return err
+	h := IndexPageHeader{
+		PageType:          PageTypeLeaf,
+		PageID:            rootLeaf.ID,
+		ParentID:          InvalidPageID,
+		Level:             0,
+		RecordCount:       0,
+		FirstRecordOffset: 0,
+		FreeStart:         IndexPageHeaderSize,
 	}
 
-	err = file.Close()
+	EncodeIndexPageHeader(rootLeaf, h)
+
+	err = pager.WritePage(rootLeaf)
 	if err != nil {
 		return err
 	}
@@ -170,7 +200,22 @@ func (x *Executor) Insert(stmt InsertStatement) error {
 		return ErrValueCountMismatch
 	}
 
-	// 4. Validasi: apa stmt.Columns yang di-INSERT itu match sama kolom yang ada di skema?
+	pkColIdx := -1
+	var pkName string
+
+	for i, col := range columns {
+		if col.Primary {
+			pkColIdx = i
+			pkName = col.Name
+			break
+		}
+	}
+
+	if pkColIdx == -1 {
+		return errors.New("primary key tidak ditemukan")
+	}
+
+	// Validasi: apa stmt.Columns yang di-INSERT itu match sama kolom yang ada di skema?
 	for i, col := range insertColumns {
 		colDef, ok := columnsMap[col]
 		if !ok {
@@ -192,32 +237,112 @@ func (x *Executor) Insert(stmt InsertStatement) error {
 			Type:    colDef.ValueType,
 		}
 	}
+	var newPK int32
+	foundPK := false
+	for _, parsed := range parsedValues {
+		if parsed.ColName != pkName {
+			continue
+		}
 
-	// 6. Buka file table dengan mode APPEND (bukan Create — filenya udah ada dari CREATE TABLE)
+		value, ok := parsed.Value.(int32)
+		if !ok {
+			return errors.New("sementara primary key hanya support INT")
+		}
+
+		newPK = value
+		foundPK = true
+		break
+	}
+
+	if !foundPK {
+		return errors.New("primary key harus diisi")
+	}
+
+	// Buka file table dengan mode APPEND (bukan Create — filenya udah ada dari CREATE TABLE)
 	filePath := filepath.Join(x.config.DataDirectory, fmt.Sprintf("/%s/%s.3tbl", stmt.DBName, stmt.Table))
-	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_WRONLY, 0644)
+	pager, err := OpenPager(filePath)
 	if err != nil {
-		return errors.Join(ErrCorruptTableFile, err)
+		return err
 	}
-	defer file.Close()
-	_, err = file.Seek(0, io.SeekEnd) // Cursor pindah ke akhir file, biar append
-	if err != nil {
-		return errors.Join(ErrCorruptTableFile, err)
-	}
+	defer pager.Close()
 
-	// 7. Encode row jadi bytes
-	encodedRow, err := encodeRow(columns, parsedValues)
+	// baca meta page
+	metaRaw, err := pager.ReadPage(0)
 	if err != nil {
 		return err
 	}
 
-	// 8. Tulis bytes itu ke file
-	n, err := file.Write(encodedRow)
+	meta, err := DecodeMetaPage(metaRaw)
 	if err != nil {
-		return errors.Join(ErrEncodeFailed, err)
+		return err
 	}
 
-	fmt.Println("berhasil nulis row ke file. bytes:", n, "length:", len(encodedRow))
+	rootPage, err := pager.ReadPage(meta.RootPageID)
+	if err != nil {
+		return err
+	}
+
+	head, err := DecodeIndexPageHeader(rootPage)
+	if err != nil {
+		return err
+	}
+
+	// cari PK column + new PK
+	var prevOffset uint16
+	currentOffset := head.FirstRecordOffset
+	for currentOffset != 0 {
+		record, _, nextOffset, _, err := decodeRecord(columns, rootPage.Data[currentOffset:])
+		if err != nil {
+			return err
+		}
+		currentPK, ok := record[pkColIdx].Value.(int32)
+		if !ok {
+			return ErrInvalidDataType
+		}
+
+		if newPK == currentPK {
+			return fmt.Errorf("duplicate primary key: %d", newPK)
+		}
+		if newPK < currentPK {
+			break
+		}
+		prevOffset = currentOffset
+		currentOffset = nextOffset
+	}
+
+	// Encode row jadi bytes
+	encodedRecord, err := encodeRecord(columns, parsedValues, currentOffset)
+	if err != nil {
+		return err
+	}
+
+	recordOffset := head.FreeStart
+	recordEnd := int(recordOffset) + len(encodedRecord)
+
+	if recordEnd > int(PageSize) {
+		return errors.New("record tidak muat di leaf page")
+	}
+
+	copy(rootPage.Data[int(recordOffset):recordEnd], encodedRecord)
+	if prevOffset == 0 {
+		head.FirstRecordOffset = recordOffset
+	} else {
+		nextOffsetPos := int(prevOffset) + recordNextOffsetPosition(columns)
+
+		binary.LittleEndian.PutUint16(
+			rootPage.Data[nextOffsetPos:nextOffsetPos+2],
+			recordOffset,
+		)
+	}
+
+	head.RecordCount++
+	head.FreeStart = uint16(recordEnd)
+
+	EncodeIndexPageHeader(rootPage, head)
+	if err := pager.WritePage(rootPage); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -236,72 +361,67 @@ func (x *Executor) Select(stmt SelectStatement) (ResultSet, error) {
 		return ResultSet{}, ErrColumnNotFound
 	}
 
-	var reqColumns map[string]bool = map[string]bool{}
-	if stmt.Columns[0] != "*" {
-		// check stmt.Columns exists in columns
-		for _, col := range stmt.Columns {
-			found := false
-			for _, expected := range columns {
-				if col == expected.Name {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return ResultSet{}, fmt.Errorf("%w. column name :%s", ErrColumnNotFound, col)
-			}
-			reqColumns[col] = true
-		}
-	} else {
-		stmt.Columns = make([]string, 0, len(columns))
-		for _, col := range columns {
-			stmt.Columns = append(stmt.Columns, col.Name)
-			reqColumns[col.Name] = true
-		}
-	}
-
 	var resultSet ResultSet = ResultSet{
 		Columns: make([]ResultColumn, 0),
-		Rows:    make([]Row, 0),
+		Records: make([]Record, 0),
 	}
 	for _, col := range columns {
-		exists := reqColumns[col.Name]
-		if exists {
-			resultSet.Columns = append(resultSet.Columns, ResultColumn{
-				Name: col.Name,
-				Type: col.ValueType,
-			})
-		}
+		resultSet.Columns = append(resultSet.Columns, ResultColumn{
+			Name: col.Name,
+			Type: col.ValueType,
+		})
 	}
 
 	filePath := filepath.Join(x.config.DataDirectory, fmt.Sprintf("/%s/%s.3tbl", stmt.DBName, stmt.Table))
-	file, err := os.Open(filePath)
+	pager, err := OpenPager(filePath)
 	if err != nil {
 		return ResultSet{}, err
 	}
-	defer file.Close()
-
-	_, err = file.Seek(15, io.SeekStart) // skip table header (15 bytes)
+	defer pager.Close()
+	page, err := pager.ReadPage(PageID(0))
 	if err != nil {
-		log.Println("gagal pindah cursor file, error:", err)
+		return ResultSet{}, err
+	}
+	meta, err := DecodeMetaPage(page)
+	if err != nil {
 		return ResultSet{}, err
 	}
 
-	for {
-		row, err := decodeRow(file, columns, reqColumns)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return ResultSet{}, err
-		}
-
-		if row != nil {
-			resultSet.Rows = append(resultSet.Rows, row)
-		}
+	rootPage, err := pager.ReadPage(meta.RootPageID)
+	if err != nil {
+		return ResultSet{}, err
 	}
+
+	records, err := x.scanLeaf(rootPage, columns)
+	if err != nil {
+		return ResultSet{}, err
+	}
+
+	resultSet.Records = records
 
 	return resultSet, nil
+}
+
+func (x *Executor) scanLeaf(page *Page, columns []ColumnDef) ([]Record, error) {
+	rootHead, err := DecodeIndexPageHeader(page)
+	if err != nil {
+		return nil, err
+	}
+
+	recordOffset := rootHead.FirstRecordOffset
+	var records []Record
+
+	for recordOffset != 0 {
+		record, _, nextOffset, _, err := decodeRecord(columns, page.Data[recordOffset:])
+		if err != nil {
+			return nil, err
+		}
+
+		records = append(records, record)
+		recordOffset = nextOffset
+	}
+
+	return records, nil
 }
 
 func parseValue(value string, valueType ValueType) (any, error) {
@@ -340,32 +460,39 @@ func parseValue(value string, valueType ValueType) (any, error) {
 	}
 }
 
-func encodeRow(columns []ColumnDef, values []ParsedValue) ([]byte, error) {
+// ┌──────────────────────────────────────┐
+// │ VarLen metadata                      │
+// │   uint16 per VARCHAR column          │
+// ├──────────────────────────────────────┤
+// │ NULL bitmap                          │
+// │   hanya untuk nullable columns       │
+// ├──────────────────────────────────────┤
+// │ Flags                  uint8         │
+// ├──────────────────────────────────────┤
+// │ NextOffset             uint16        │
+// ├──────────────────────────────────────┤
+// │ Column Data                          │
+// │   INT       4 bytes                  │
+// │   VARCHAR   raw bytes                │
+// │   FLOAT     4 bytes                  │
+// │   BOOLEAN   1 byte                   │
+// │   NULL      0 byte                   │
+// └──────────────────────────────────────┘
+func encodeRecord(columns []ColumnDef, values []ParsedValue, nextOff uint16) ([]byte, error) {
 	buf := new(bytes.Buffer)
 
-	rowStatus := true
-	/*
-		Satu byte dapat menyimpan status NULL untuk 8 kolom.
-		1 kolom  = 1 byte
-		8 kolom  = 1 byte
-		9 kolom  = 2 byte
-		16 kolom = 2 byte
-		17 kolom = 3 byte
-	*/
-	nullLength := uint16(math.Ceil(float64(len(columns)) / 8.0))
-	nullBitmap := make([]byte, nullLength)
-
-	err := binary.Write(buf, binary.LittleEndian, rowStatus)
-	if err != nil {
-		log.Default().Println("error encode row header :", err)
-		return nil, err
+	/**
+	* Null bitmap hanya digunakan dibuat untuk nullable column saja, jangan semua kolom
+	**/
+	nullable := 0
+	for _, col := range columns {
+		if col.Nullable {
+			nullable++
+		}
 	}
 
-	err = binary.Write(buf, binary.LittleEndian, nullLength)
-	if err != nil {
-		log.Default().Println("error encode row header :", err)
-		return nil, err
-	}
+	nullBitmap := make([]byte, (nullable+7)/8)
+
 	/*
 		Ubah []ParsedValue menjadi map supaya tidak perlu
 		melakukan nested loop untuk setiap kolom.
@@ -376,77 +503,118 @@ func encodeRow(columns []ColumnDef, values []ParsedValue) ([]byte, error) {
 	}
 
 	orderedValues := make([]any, len(columns))
+	nullIdx := 0
+
 	for idx, col := range columns {
 		parsedValue, exists := valuesByColumn[col.Name]
-		if !exists || parsedValue.Value == nil {
+		isNull := !exists || parsedValue.Value == nil
+
+		if isNull {
 			if !col.Nullable {
-				return nil, fmt.Errorf("%w, %s ", ErrNotNullViolation, col.Name)
+				return nil, fmt.Errorf(
+					"%w, %s",
+					ErrNotNullViolation,
+					col.Name,
+				)
 			}
 
-			setNullBit(nullBitmap, idx)
+			setNullBit(nullBitmap, nullIdx)
+		} else {
+			orderedValues[idx] = parsedValue.Value
+		}
+
+		if col.Nullable {
+			nullIdx++
+		}
+	}
+
+	for colIdx, col := range columns {
+		if col.ValueType != VarcharType {
 			continue
 		}
 
-		orderedValues[idx] = parsedValue.Value
+		var length uint16
+		if orderedValues[colIdx] != nil {
+			value, ok := orderedValues[colIdx].(string)
+			if !ok {
+				return nil, ErrInvalidDataType
+			}
+			raw := []byte(value)
+
+			if len(raw) > 0xffff {
+				return nil, ErrStringTooLong
+			}
+
+			length = uint16(len(raw))
+		}
+
+		if err := binary.Write(buf, binary.LittleEndian, length); err != nil {
+			return nil, err
+		}
 	}
 
-	err = binary.Write(buf, binary.LittleEndian, nullBitmap)
+	_, err := buf.Write(nullBitmap)
 	if err != nil {
-		log.Default().Println("error encode row header :", err)
+		return nil, err
+	}
+	// ---------------------------------------------------------
+	// 6. Flags
+	//
+	// bit 0 nanti bisa digunakan sebagai delete-mark.
+	//
+	// 00000000 = normal
+	// ---------------------------------------------------------
+	var flags uint8 = 0
+	if err := binary.Write(buf, binary.LittleEndian, flags); err != nil {
+		return nil, err
+	}
+
+	// Next record offset
+	if err := binary.Write(buf, binary.LittleEndian, nextOff); err != nil {
 		return nil, err
 	}
 
 	// encode each columns
 	for idx, col := range columns {
-		if isNullBitSet(nullBitmap, idx) {
-			// NULL tidak mempunyai payload.
-			continue
-		}
+		value := orderedValues[idx]
 
-		var value any
-		// Cari value yang sesuai dengan kolom ini
-		for _, v := range values {
-			if v.ColName == col.Name {
-				value = v.Value
-				break
-			}
+		if value == nil {
+			continue
 		}
 
 		switch col.ValueType {
 		case IntType:
-			intVal := value.(int32)
+			intVal, ok := value.(int32)
+			if !ok {
+				return nil, ErrInvalidDataType
+			}
+
 			err := binary.Write(buf, binary.LittleEndian, intVal)
 			if err != nil {
 				return nil, ErrCorruptTableFile
 			}
-		case VarcharType:
-			strVal := value.(string)
-			strBytes := []byte(strVal)
-			strLen := uint32(len(strBytes))
-
-			// Tulis panjang string dulu (2 bytes == uint16), baru tulis string itu sendiri
-			err := binary.Write(buf, binary.LittleEndian, strLen)
-			if err != nil {
-				return nil, ErrCorruptTableFile
+		case FloatType:
+			floatVal, ok := value.(float32)
+			if !ok {
+				return nil, ErrInvalidDataType
 			}
 
-			// Tulis string itu sendiri
-			_, err = buf.Write(strBytes)
-			if err != nil {
+			if err := binary.Write(buf, binary.LittleEndian, floatVal); err != nil {
 				return nil, ErrCorruptTableFile
 			}
-
 		case BooleanType:
 			boolVal := value.(bool)
 			err := binary.Write(buf, binary.LittleEndian, boolVal)
 			if err != nil {
 				return nil, ErrCorruptTableFile
 			}
+		case VarcharType:
+			strVal, ok := value.(string)
+			if !ok {
+				return nil, ErrInvalidDataType
+			}
 
-		case FloatType:
-			floatVal := value.(float32)
-			err := binary.Write(buf, binary.LittleEndian, floatVal)
-			if err != nil {
+			if _, err = buf.Write([]byte(strVal)); err != nil {
 				return nil, ErrCorruptTableFile
 			}
 		}
@@ -455,67 +623,135 @@ func encodeRow(columns []ColumnDef, values []ParsedValue) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func decodeRow(r io.ReadSeeker, cols []ColumnDef, required map[string]bool) (Row, error) {
-	// 1. Baca status row.
-	var status uint8
-	err := binary.Read(r, binary.LittleEndian, &status)
-	if err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil, err
+func decodeRecord(columns []ColumnDef, data []byte) (record Record, flag uint8, nextOffset uint16, recordSize int, err error) {
+	offset := 0
+
+	// -----------------------------------------
+	// 1. Baca metadata panjang VARCHAR
+	// -----------------------------------------
+	varcharLengths := make(map[int]uint16)
+	for colIdx, col := range columns {
+		if col.ValueType != VarcharType {
+			continue
 		}
-		return nil, ErrCorruptTableFile
+
+		if offset+2 > len(data) {
+			return nil, 0, 0, 0, errors.New("invalid record: varchar metadata overflow")
+		}
+
+		length := binary.LittleEndian.Uint16(data[offset : offset+2])
+		offset += 2
+
+		varcharLengths[colIdx] = length
+	}
+	nullableCount := 0
+
+	for _, col := range columns {
+		if col.Nullable {
+			nullableCount++
+		}
 	}
 
-	var nullBitmapLength uint16
-
-	err = binary.Read(r, binary.LittleEndian, &nullBitmapLength)
-	if err != nil {
-		return nil, err
+	nullBitmapLength := (nullableCount + 7) / 8
+	if offset+nullBitmapLength > len(data) {
+		return nil, 0, 0, 0, errors.New("invalid record: null bitmap overflow")
 	}
-	expectedBitmapLength := (len(cols) + 7) / 8
+	nullBitmap := data[offset : offset+nullBitmapLength]
+	offset += nullBitmapLength
 
-	if expectedBitmapLength != int(nullBitmapLength) {
-		return nil, fmt.Errorf(
-			"%w: invalid null bitmap length, expected %d got %d",
-			ErrCorruptTableFile,
-			expectedBitmapLength,
-			nullBitmapLength,
-		)
+	// -----------------------------------------
+	// 3. flags
+	// -----------------------------------------
+	if offset+1 > len(data) {
+		return nil, 0, 0, 0, fmt.Errorf("invalid record: missing flags")
 	}
 
-	nullBitmap := make([]byte, nullBitmapLength)
-	_, err = io.ReadFull(r, nullBitmap)
-	if err != nil {
-		return nil, err
-	}
+	flags := data[offset]
+	offset++
 
-	row := make(Row, 0, len(cols))
-	for idx, col := range cols {
-		var value Value
-		if isNullBitSet(nullBitmap, idx) {
-			value = Value{
+	// Next Offset (2 bytes)
+	nextOffset = binary.LittleEndian.Uint16(data[offset : offset+2])
+	offset += 2
+
+	// -----------------------------------------
+	// 5. Decode column payload
+	// -----------------------------------------
+	record = make(Record, len(columns))
+
+	nullableIdx := 0
+	for colIdx, col := range columns {
+		isNull := false
+		if col.Nullable {
+			isNull = isNullBitSet(nullBitmap, nullableIdx)
+			nullableIdx++
+		}
+		if isNull {
+			record[colIdx] = Value{
 				Type:  col.ValueType,
-				Value: nil,
 				Null:  true,
+				Value: nil,
 			}
 			continue
 		}
-
-		if required[col.Name] {
-			value, err = decodeValue(r, col)
-			if err != nil {
-				return nil, err
+		switch col.ValueType {
+		case IntType:
+			if offset+4 > len(data) {
+				return nil, 0, 0, 0, ErrInvalidValue
 			}
 
-			row = append(row, value)
-			continue
-		}
+			value := int32(binary.LittleEndian.Uint32(data[offset : offset+4]))
 
-		if err := skipValue(r, col); err != nil {
-			return nil, err
+			record[colIdx] = Value{
+				Type:  IntType,
+				Value: value,
+				Null:  false,
+			}
+			offset += 4
+		case FloatType:
+			if offset+4 > len(data) {
+				return nil, 0, 0, 0, ErrInvalidValue
+			}
+			raw := binary.LittleEndian.Uint32(data[offset : offset+4])
+			record[colIdx] = Value{
+				Type:  FloatType,
+				Value: math.Float32frombits(raw),
+				Null:  false,
+			}
+			offset += 4
+
+		case BooleanType:
+			if offset+1 > len(data) {
+				return nil, 0, 0, 0, fmt.Errorf(
+					"invalid record: boolean overflow column %s",
+					col.Name,
+				)
+			}
+
+			record[colIdx] = Value{
+				Type:  BooleanType,
+				Value: data[offset] != 0,
+				Null:  false,
+			}
+			offset++
+		case VarcharType:
+			length := int(varcharLengths[colIdx])
+			if offset+length > len(data) {
+				return nil, 0, 0, 0, ErrInvalidValue
+			}
+			record[colIdx] = Value{
+				Type:  VarcharType,
+				Value: string(data[offset : offset+length]),
+				Null:  false,
+			}
+			offset += length
+		default:
+			return nil, 0, 0, 0, fmt.Errorf(
+				"unsupported value type for column %s",
+				col.Name,
+			)
 		}
 	}
-	return row, nil
+	return record, flags, nextOffset, offset, nil
 }
 
 func skipValue(r io.ReadSeeker, col ColumnDef) error {
@@ -601,16 +837,137 @@ func decodeValue(r io.Reader, col ColumnDef) (Value, error) {
 	}
 }
 
-func setNullBit(bitmap []byte, columnIndex int) {
-	byteIndx := columnIndex / 8
-	bitIndx := uint(columnIndex % 8)
+func setNullBit(bitmap []byte, nullIdx int) {
+	byteIndx := nullIdx / 8
+	bitIndx := uint(nullIdx % 8)
 
 	bitmap[byteIndx] |= byte(1 << bitIndx)
 }
 
 func isNullBitSet(bitmap []byte, colIdx int) bool {
 	byteIdx := colIdx / 8
-	bitIdx := uint(colIdx % 8)
+	bitIdx := colIdx % 8
 
 	return bitmap[byteIdx]&byte(1<<bitIdx) != 0
+}
+
+func EncodeMetaPage(meta MetaPage) *Page {
+	page := Page{
+		ID:   0,
+		Data: [PageSize]byte{},
+	}
+	copy(page.Data[0:4], meta.Magic[:])
+
+	page.Data[4] = meta.Version
+
+	binary.LittleEndian.PutUint16(
+		page.Data[5:7],
+		meta.PageSize,
+	)
+
+	binary.LittleEndian.PutUint32(
+		page.Data[7:11],
+		uint32(meta.RootPageID),
+	)
+
+	binary.LittleEndian.PutUint32(
+		page.Data[11:15],
+		uint32(meta.NextPageID),
+	)
+	return &page
+}
+
+func DecodeMetaPage(page *Page) (MetaPage, error) {
+	meta := MetaPage{}
+	n := copy(meta.Magic[:], page.Data[0:4])
+	if n != 4 {
+		return meta, ErrPageReadFailed
+	}
+
+	_, err := binary.Decode(page.Data[4:5], binary.LittleEndian, &meta.Version)
+	if err != nil {
+		return meta, err
+	}
+	_, err = binary.Decode(page.Data[5:7], binary.LittleEndian, &meta.PageSize)
+	if err != nil {
+		return meta, err
+	}
+
+	_, err = binary.Decode(page.Data[7:11], binary.LittleEndian, &meta.RootPageID)
+	if err != nil {
+		return meta, err
+	}
+
+	_, err = binary.Decode(page.Data[11:15], binary.LittleEndian, &meta.NextPageID)
+	if err != nil {
+		return meta, err
+	}
+	return meta, nil
+}
+
+func EncodeIndexPageHeader(page *Page, h IndexPageHeader) {
+	page.Data[0] = byte(h.PageType)
+	binary.LittleEndian.PutUint32(page.Data[1:5], uint32(h.PageID))
+
+	binary.LittleEndian.PutUint32(page.Data[5:9], uint32(h.ParentID))
+
+	binary.LittleEndian.PutUint16(page.Data[9:11], h.Level)
+
+	binary.LittleEndian.PutUint16(page.Data[11:13], h.RecordCount)
+
+	binary.LittleEndian.PutUint16(page.Data[13:15], h.FirstRecordOffset)
+
+	binary.LittleEndian.PutUint16(page.Data[15:17], h.FreeStart)
+}
+
+func DecodeIndexPageHeader(page *Page) (IndexPageHeader, error) {
+	var h IndexPageHeader = IndexPageHeader{}
+	h.PageType = PageType(page.Data[0])
+	_, err := binary.Decode(page.Data[1:5], binary.LittleEndian, &h.PageID)
+	if err != nil {
+		return h, err
+	}
+	_, err = binary.Decode(page.Data[5:9], binary.LittleEndian, &h.ParentID)
+	if err != nil {
+		return h, err
+	}
+	_, err = binary.Decode(page.Data[9:11], binary.LittleEndian, &h.Level)
+	if err != nil {
+		return h, err
+	}
+
+	_, err = binary.Decode(page.Data[11:13], binary.LittleEndian, &h.RecordCount)
+	if err != nil {
+		return h, err
+	}
+
+	_, err = binary.Decode(page.Data[13:15], binary.LittleEndian, &h.FirstRecordOffset)
+	if err != nil {
+		return h, err
+	}
+
+	_, err = binary.Decode(page.Data[15:17], binary.LittleEndian, &h.FreeStart)
+	if err != nil {
+		return h, err
+	}
+	return h, nil
+}
+
+func recordNextOffsetPosition(cols []ColumnDef) int {
+	varcharCnt := 0
+	nullableCnt := 0
+
+	for _, col := range cols {
+		if col.ValueType == VarcharType {
+			varcharCnt++
+		}
+		if col.Nullable {
+			nullableCnt++
+		}
+	}
+	varlenMetadataSize := varcharCnt * 2
+	nullBitmapSize := (nullableCnt + 7) / 8
+	flagSize := 1
+
+	return varlenMetadataSize + nullBitmapSize + flagSize
 }
