@@ -2,7 +2,7 @@
 
 Dokumen ini adalah peta belajar dan checklist. Semua implementasi Go harus ditulis sendiri oleh pemilik proyek.
 
-## Status audit — 7 Agustus 2026
+## Status audit — 15 Agustus 2026
 
 Legenda:
 
@@ -12,12 +12,18 @@ Legenda:
 
 ### Ringkasan kondisi saat ini
 
-- Sudah ada REPL, config loader, lexer, parser AST, catalog JSON, `CREATE DATABASE`, `CREATE TABLE`, `INSERT`, dan `SELECT` sequential scan.
-- Format row awal sudah memiliki status byte, panjang null bitmap, null bitmap, dan payload bertipe.
-- Source Go lolos compile check setelah nama file dinormalisasi dan directive Go disesuaikan dengan toolchain audit; project belum memiliki test source resmi.
-- Storage masih append-only stream; belum ada page 4096 byte, page ID, slot directory, root page, atau free-page management.
-- Target berikutnya dipindahkan ke **clustered primary-key B+ tree**: file tabel menjadi tree utama dan leaf menyimpan full row.
-- Sebelum masuk tree split, perbaiki decoder projection, trailing-whitespace panic pada lexer, validasi table header, dan batas maksimum row.
+- Sudah ada REPL, config loader, lexer, parser AST, catalog JSON, `CREATE DATABASE`, `CREATE TABLE`, `INSERT`, dan `SELECT`.
+- Storage tabel sudah berpindah ke **page-based 4096 byte** dengan `Pager`, `PageID`, `ReadPage`, `WritePage`, dan alokasi page.
+- Page 0 adalah `MetaPage`; root B+ tree dibaca melalui `MetaPage.RootPageID`. Page 1+ dipakai sebagai page B+ tree.
+- Root awal berupa satu **leaf page** kosong dengan `IndexPageHeader`.
+- Format record v1 sudah menjadi: varlen metadata → null bitmap → flags → `NextOffset` → payload kolom.
+- `encodeRecord()` dan `decodeRecord()` sudah round-trip melalui file; data tetap dapat dibaca setelah program ditutup dan dibuka kembali.
+- `SELECT *` sudah membaca record dari leaf melalui `FirstRecordOffset` lalu mengikuti `NextOffset`.
+- `INSERT` pada satu leaf sudah menjaga **urutan logis PRIMARY KEY** walaupun posisi fisik record append ke `FreeStart`.
+- Insert depan, tengah, dan belakang menggunakan pasangan `prevOffset` / `currentOffset`; predecessor di-patch agar menunjuk ke record baru.
+- Duplicate primary key sudah ditolak dan constraint `NOT NULL` sudah tervalidasi saat insert.
+- Tree saat ini masih **single-leaf**. Belum ada leaf split, internal page aktif, root split, atau traversal multi-level.
+- Target berikutnya: kuatkan test single-leaf, lalu implementasikan **leaf split → internal root → traversal root ke leaf**.
 
 ## Tujuan akhir
 
@@ -73,11 +79,11 @@ Catatan: susunan ini adalah model belajar. Nanti planner boleh mengubah urutan i
 - [x] Tentukan aturan nama database, tabel, kolom, dan index.
 - [x] Tentukan apakah nama bersifat case-sensitive.
 - [x] Tentukan tipe data awal dan representasi nilai `NULL`.
-- [~] Tentukan batas ukuran text dan ukuran page. — Sudah dipilih page 4096 byte dan row sekitar 3500 byte di `DESIGN.md`, tetapi belum ditegakkan oleh storage; kode masih menerima varchar hingga 16 MiB.
+- [~] Tentukan batas ukuran text dan ukuran page. — `PageSize = 4096` sudah aktif dan insert menolak record yang melewati batas page; batas maksimum VARCHAR/record formal masih perlu diselaraskan dengan kontrak storage.
 - [~] Tentukan format direktori dan nama file di disk. — Sudah ada `DataDirectory`, `CatalogPath`, dan ekstensi `.3tbl`; path creation masih perlu dirapikan dengan `filepath.Join`.
 - [~] Tentukan format metadata katalog dan nomor versinya. — Catalog JSON sudah ada, tetapi belum memiliki `catalog_version` dan metadata primary/index.
-- [~] Tentukan format record: header, null bitmap, dan payload. — Format awal sudah ada, tetapi belum memiliki total row length, slot, dan boundary page.
-- [ ] Tentukan identitas stabil sebuah record. — Untuk clustered tree, gunakan **primary key sebagai identitas logis**; `PageID + slot` hanya lokasi fisik sementara karena row dapat berpindah saat split.
+- [x] Tentukan format record: varlen metadata, null bitmap, flags, `NextOffset`, lalu payload kolom. — Sudah dipakai oleh `encodeRecord()` dan `decodeRecord()`.
+- [x] Tentukan identitas stabil sebuah record. — Untuk clustered tree, **primary key adalah identitas logis**; offset record di page hanya lokasi fisik yang dapat berubah.
 - [~] Tentukan perilaku error untuk objek yang sudah ada atau tidak ditemukan. — Sentinel error sudah ada, tetapi masih bercampur dengan `panic`, `log.Fatal`, dan raw I/O error.
 - [ ] Tentukan kapan perubahan dipaksa tersimpan ke disk dengan `File.Sync()` dan urutan flush meta/data.
 
@@ -96,7 +102,7 @@ Pelajari sambil membuat eksperimen kecil terpisah dari mesin database.
 - [~] Memahami interface dan generics (`type Foo[T any] struct{...}`) secukupnya. — Interface `Statement` dan `DBLogger` sudah ada; generics belum diperlukan/dipraktikkan.
 - [~] Memahami package dan visibility. — Exported/unexported identifier sudah dipakai, tetapi seluruh project masih berada di `package main`.
 - [~] Memahami `os.File`: `Read`, `Write`, `Seek`, `Sync`, dan `os.Rename`. — Read/Write/Seek sudah dipakai; Sync/Rename belum.
-- [ ] Memahami `testing` package: unit test, table-driven test, dan `go test`.
+- [~] Memahami `testing` package: unit test, table-driven test, dan `go test`. — Sudah menulis/menjalankan test storage dasar seperti empty-tree/header; test matrix masih perlu diperluas.
 - [~] Memahami cara membuat error domain sendiri. — Sentinel error sudah ada; startup masih memakai `panic` dan create database masih dapat `log.Fatal`.
 
 **Lulus jika:** kamu dapat menjelaskan siapa pemilik setiap data utama dan bagaimana error bergerak dari storage sampai CLI.
@@ -111,7 +117,7 @@ Sebelum implementasi, tulis contoh input dan hasil yang diharapkan.
 - [~] Kasus tipe nilai salah. — Validasi insert tersedia, tetapi belum ada test dan range check `int32`.
 - [~] Kasus tabel kosong. — Formatter menangani hasil tanpa row, tetapi belum diuji otomatis.
 - [~] Kasus text kosong, nilai negatif, dan nilai besar. — String kosong dapat direpresentasikan; angka negatif belum dikenali lexer dan nilai besar belum memiliki range check.
-- [~] Kasus database ditutup lalu dibuka kembali. — Catalog/data dibaca dari disk, tetapi belum ada restart test.
+- [~] Kasus database ditutup lalu dibuka kembali. — Sudah diverifikasi manual bahwa row tetap terbaca setelah restart; automated restart test belum ada.
 - [~] Pisahkan error syntax, semantic, constraint, dan I/O. — Sentinel sudah dikelompokkan secara nama, tetapi belum menjadi typed/category error yang konsisten.
 
 **Lulus jika:** perilaku yang diinginkan dapat diuji tanpa perlu mengetahui detail implementasi.
@@ -138,20 +144,22 @@ Jangan menyentuh penyimpanan disk dahulu.
 
 ## Milestone 3 — Storage paling sederhana
 
-Mulai dari record append-only agar konsep disk mudah terlihat.
+Storage dasar sekarang sudah memakai page tetap 4096 byte dan menjadi fondasi clustered tree.
 
-- [ ] Buat abstraksi file dan page (struct `Page`, `File` dengan method `os.File` di baliknya).
-- [~] Tentukan header file dan magic number. — Header 15 byte dengan magic `3DB1` dan version 1 sudah ditulis, tetapi belum divalidasi saat open.
-- [ ] Nomori setiap page.
-- [~] Buat serialisasi dan deserialisasi nilai. — Int/float/bool/varchar/null sudah ada; decoder masih memiliki bug projection
-- [~] Buat format row/record. — Ada status byte + bitmap length + null bitmap + payload, tetapi belum ada row length dan slot directory.
-- [ ] Buat slot directory agar record dapat ditemukan lewat identitas stabil.
-- [x] Dapat menambah record secara append-only.
-- [ ] Dapat membaca ulang record berdasarkan identitasnya.
-- [~] Dapat melakukan sequential scan seluruh record. — `SELECT *` tersedia; projection sebagian dapat membuat cursor desinkron karena payload kolom yang tidak dipilih tidak dikonsumsi.
-- [~] Tandai record terhapus dengan tombstone terlebih dahulu. — Status byte sudah ditulis, tetapi belum dibaca/dipakai oleh DELETE/scan.
-- [ ] Pastikan file yang rusak atau versi yang salah ditolak dengan error (bukan panic).
-- [ ] Uji persistence setelah proses ditutup dan dibuka lagi.
+- [x] Buat abstraksi `Page`, `PageID`, dan `Pager`.
+- [x] Gunakan ukuran page tetap `4096` byte.
+- [x] Page 0 menjadi `MetaPage` dengan magic `3DB1`, version, page size, root page ID, dan next page ID.
+- [x] Implementasikan `ReadPage(pageID)` dan `WritePage(page)` dengan offset `pageID * PageSize`.
+- [~] Implementasikan allocator page monotonik. — `AllocatePage()` sudah ada; perlu test khusus agar beberapa allocation sebelum write tidak menghasilkan ID sama.
+- [x] Buat serialisasi/deserialisasi nilai INT, FLOAT, BOOLEAN, VARCHAR, dan NULL dalam record.
+- [x] Format record v1: varlen metadata → null bitmap → flags → `NextOffset` → payload.
+- [x] Gunakan `FreeStart` sebagai posisi append fisik record berikutnya di dalam page.
+- [x] Dapat membaca kembali record dari disk menggunakan schema tabel.
+- [x] Dapat scan seluruh record pada satu leaf melalui `FirstRecordOffset` dan `NextOffset`.
+- [x] Persistence manual: row tetap identik setelah program ditutup dan dibuka kembali.
+- [ ] Validasi magic number, version, page type, dan boundary record secara ketat saat read/open.
+- [ ] Tambahkan automated round-trip/restart test untuk seluruh tipe data dan NULL.
+- [ ] Tombstone/delete-mark belum dipakai oleh DELETE.
 
 **Lulus jika:** sekumpulan row yang ditulis dapat dibaca kembali dengan nilai identik setelah restart.
 
@@ -161,60 +169,67 @@ Target ini sengaja ditempatkan setelah storage dasar karena clustered tree **ada
 
 ### Kontrak versi pertama
 
-- [ ] Hanya mendukung satu `PRIMARY KEY` per tabel.
-- [ ] Primary key versi pertama hanya `INT`, `NOT NULL`, dan unik.
-- [ ] Jika tabel tidak mendefinisikan primary key, tolak `CREATE TABLE` terlebih dahulu; hidden row ID dapat ditambahkan setelah versi dasar stabil.
-- [ ] Identitas logis row adalah primary key, bukan `PageID + slot`, karena split dapat memindahkan row.
+- [x] Hanya mendukung satu `PRIMARY KEY` per tabel.
+- [~] Primary key versi pertama hanya `INT`, `NOT NULL`, dan unik. — Insert sudah mengharuskan PK `int32` dan duplicate ditolak; validasi tipe/nullability sebaiknya juga ditegakkan saat `CREATE TABLE`.
+- [x] Jika tabel tidak mendefinisikan primary key, tolak `CREATE TABLE` terlebih dahulu.
+- [x] Identitas logis row adalah primary key, bukan offset fisik record.
 - [ ] Secondary index nantinya menyimpan `(secondary_key, primary_key)`, lalu lookup dilanjutkan ke clustered tree.
-- [ ] Leaf menyimpan full row; internal node hanya menyimpan separator key dan child page ID.
+- [~] Leaf sudah menyimpan full row; format internal node belum diimplementasikan.
 - [ ] Semua leaf berada pada depth yang sama dan terhubung dengan `next_leaf` untuk sequential/range scan.
 - [ ] Gunakan invariant separator: setiap separator adalah key terkecil pada child di sebelah kanan.
 - [ ] Tidak perlu merge/rebalance saat delete pada versi pertama; tandai deleted atau compact satu leaf, tetapi tree harus tetap searchable.
 
-### Blocker yang harus diperbaiki dahulu
+### Blocker / hardening sebelum split
 
 - [ ] Perbaiki lexer agar trailing whitespace tidak mengakses index di luar string.
 - [ ] Tambahkan token terminator `;` atau secara eksplisit strip terminator sebelum tokenize.
-- [ ] Perbaiki `decodeRow`: seluruh payload kolom harus selalu dikonsumsi, baru projection dilakukan.
-- [ ] Ganti error bitmap length mismatch yang saat ini dapat mengembalikan `nil` error menjadi `ErrCorruptTableFile`.
-- [ ] Perbaiki decoded boolean agar `Value.Type == BooleanType`.
+- [~] Pastikan projection parsial tidak membuat decoder/cursor desinkron. — `decodeRecord()` sekarang membaca satu record penuh; projection query masih perlu diuji.
+- [x] `decodeRecord()` mengembalikan record terstruktur dan ukuran record yang dikonsumsi.
+- [x] NULL bitmap dibaca berdasarkan nullable column dan digunakan saat decode.
+- [x] `NextOffset` dibaca/ditulis sebagai pointer logical-next di dalam leaf.
 - [ ] Validasi magic number dan file version ketika tabel dibuka.
-- [ ] Samakan batas row dengan desain page: encoded row + slot + cell header harus muat dalam satu leaf page.
-- [ ] Tambahkan test encode/decode round-trip sebelum format lama diganti.
+- [~] Boundary page sudah dicek saat insert (`recordEnd <= PageSize`); batas maksimum record/VARCHAR formal masih perlu dirapikan.
+- [ ] Tambahkan automated encode/decode round-trip test untuk seluruh tipe data, NULL, empty string, dan nilai batas.
+- [ ] Tambahkan test insert depan, tengah, belakang, duplicate PK, dan persistence.
 
 ### Parser dan catalog primary key
 
-- [ ] Tambahkan keyword `primary` dan `key`.
-- [ ] Parser menerima bentuk awal: `CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR)`.
-- [ ] Tambahkan `PrimaryKey bool` ke `ColumnDef`, atau `PrimaryKeyColumn string` ke `TableDef`.
-- [ ] Tolak primary key lebih dari satu, nullable primary key, dan primary key non-int pada versi pertama.
-- [ ] Catalog menyimpan primary-key column dan format version tabel.
+- [x] Tambahkan keyword `primary` dan `key`.
+- [x] Parser menerima bentuk awal: `CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR)`.
+- [x] Metadata kolom menyimpan flag primary key (`ColumnDef.Primary`).
+- [~] Primary key lebih dari satu sudah ditolak; nullable/non-int perlu dipastikan ditolak saat `CREATE TABLE`, bukan baru saat insert.
+- [~] Catalog sudah menyimpan flag primary pada kolom; format version tabel belum ada.
 
 ### Page dan file layout
 
-- [ ] Definisikan `const PageSize = 4096` dan `type PageID uint32`.
-- [ ] Page 0 menjadi meta page dengan minimal: magic, version, page size, root page ID, first leaf page ID, next page ID, dan free-list head.
-- [ ] Definisikan page type: `MetaPage`, `InternalPage`, `LeafPage`, dan `FreePage`.
-- [ ] Definisikan common page header: page type, page ID, parent page ID, cell count, free-space start, dan free-space end.
-- [ ] Leaf header memiliki `prev_leaf` dan `next_leaf`.
-- [ ] Leaf menggunakan slotted-page layout karena encoded row berukuran variabel.
-- [ ] Internal page memakai `first_child_page_id` lalu cell berulang `{separator_key int32, right_child_page_id}`.
-- [ ] Implementasikan `ReadPage(pageID)` dan `WritePage(pageID)` menggunakan offset `int64(pageID) * PageSize`.
-- [ ] Implementasikan allocator page monotonik dahulu; free list dapat tetap kosong pada tahap awal.
+- [x] Definisikan `const PageSize = 4096` dan `type PageID uint32`.
+- [x] Page 0 adalah `MetaPage` khusus: magic, version, page size, root page ID, dan next page ID.
+- [x] Page 1+ menggunakan `IndexPageHeader` untuk page B+ tree.
+- [x] Definisikan page type aktif: `PageTypeLeaf` dan `PageTypeInternal`.
+- [x] `IndexPageHeader` berisi: page type, page ID, parent ID, level, record count, first record offset, dan free start.
+- [x] Meta page **tidak** memakai `IndexPageHeader`; tidak ada common page header pada format v1.
+- [x] Leaf kosong: `FirstRecordOffset = 0`, `RecordCount = 0`, dan `FreeStart = IndexPageHeaderSize`.
+- [x] Record leaf dihubungkan secara logis dengan `NextOffset`; `NextOffset = 0` berarti tail/end.
+- [x] Record baru ditulis secara fisik pada `FreeStart`; urutan fisik tidak harus sama dengan urutan primary key.
+- [x] Versi sekarang sengaja tidak memakai slot directory dan tidak memakai INFIMUM/SUPREMUM.
+- [ ] Tentukan format internal page sederhana: separator key + child page ID.
+- [x] Implementasikan `ReadPage(pageID)` dan `WritePage(page)` menggunakan offset `int64(pageID) * PageSize`.
+- [~] Implementasikan allocator page monotonik; tambahkan test multi-allocation dan persist `NextPageID` bila allocator mulai bergantung pada meta.
+- [ ] Tentukan mekanisme scan antar-leaf setelah split sebelum full table scan multi-page.
 
 ### Operasi B+ tree secara bertahap
 
-- [ ] Buat tabel baru dengan root berupa satu leaf page kosong.
-- [ ] Implementasikan binary search key di dalam leaf.
-- [ ] Implementasikan traversal root → internal → leaf untuk `Find(pk)`.
-- [ ] Implementasikan insert terurut ke leaf selama page masih cukup.
-- [ ] Tolak duplicate primary key sebelum perubahan dipublikasikan.
+- [x] Buat tabel baru dengan root berupa satu leaf page kosong.
+- [ ] Optimalkan pencarian key di leaf. — Saat ini pencarian posisi insert masih linear melalui `NextOffset`; binary search belum relevan sampai ada struktur offset/index tambahan.
+- [ ] Implementasikan traversal root → internal → leaf untuk `Find(pk)` setelah internal page tersedia.
+- [x] Implementasikan insert terurut ke leaf selama page masih cukup.
+- [x] Tolak duplicate primary key sebelum perubahan dipublikasikan.
 - [ ] Implementasikan leaf split, perbarui sibling link, lalu naikkan separator ke parent.
 - [ ] Implementasikan pembuatan root internal baru ketika root leaf pecah.
 - [ ] Implementasikan insert separator ke internal page.
 - [ ] Implementasikan internal split dan recursive parent split.
 - [ ] Perbarui `root_page_id` di meta page ketika root berubah.
-- [ ] Implementasikan full scan mulai dari left-most leaf lalu mengikuti `next_leaf`.
+- [~] Full scan single-leaf sudah berfungsi melalui `FirstRecordOffset` → `NextOffset`; scan multi-leaf belum ada.
 - [ ] Implementasikan `SELECT ... WHERE pk = value` melalui clustered lookup.
 - [ ] Implementasikan `UPDATE` non-PK; bila ukuran row tidak lagi muat, lakukan delete + reinsert.
 - [ ] Implementasikan perubahan PK sebagai delete old key + insert new key.
@@ -222,12 +237,12 @@ Target ini sengaja ditempatkan setelah storage dasar karena clustered tree **ada
 
 ### Test wajib sebelum integrasi SQL penuh
 
-- [ ] Insert key berurutan: `1,2,3,...` sampai terjadi beberapa split.
+- [~] Insert key berurutan sudah diuji manual pada satu leaf; belum sampai split.
 - [ ] Insert key menurun: `100,99,98,...`.
-- [ ] Insert key acak dengan seed tetap.
-- [ ] Duplicate key selalu ditolak dan tree tetap identik.
-- [ ] Setiap key yang ditulis dapat ditemukan setelah reopen file.
-- [ ] Full scan menghasilkan primary key terurut.
+- [~] Insert key tidak berurutan sudah diuji manual (contoh `1,2,5,3`) dan SELECT tetap terurut; automated random-seed test belum.
+- [~] Duplicate key sudah ditolak pada insert; perlu automated test bahwa bytes/tree tidak berubah.
+- [~] Persistence setelah reopen sudah terbukti manual melalui `SELECT`; lookup per-PK belum ada.
+- [x] Full scan pada single-leaf menghasilkan primary key terurut melalui chain `NextOffset`.
 - [ ] Semua leaf memiliki depth yang sama.
 - [ ] Parent pointer, child pointer, separator, dan sibling link valid setelah setiap split.
 - [ ] Root split lebih dari sekali.
@@ -245,7 +260,7 @@ Catalog adalah sumber kebenaran metadata, bukan isi direktori yang ditebak-tebak
 - [ ] Catalog mencatat index, kolom target, jenis biasa/unik, dan file index.
 - [~] Implementasikan create database. — Sudah ada, tetapi path masih dikonkatenasi langsung, mkdir masih hard-coded, dan error dapat menghentikan proses.
 - [ ] Implementasikan drop database dengan pemeriksaan target yang ketat.
-- [~] Implementasikan create table. — File/header dan catalog dibuat, tetapi belum atomic dan belum rollback jika catalog save gagal.
+- [~] Implementasikan create table. — Meta page + root leaf + catalog sudah dibuat; operasi belum atomic dan belum rollback jika catalog save gagal.
 - [ ] Implementasikan drop table beserta metadata index miliknya.
 - [ ] Perubahan metadata dilakukan secara aman (write ke file sementara lalu `os.Rename`) agar file setengah tertulis tidak dianggap valid.
 - [~] Uji catalog setelah restart. — `LoadCatalog` ada; automated restart test belum.
@@ -275,15 +290,15 @@ Kerjakan satu demi satu; jangan menggabungkan semuanya sekaligus.
 
 - [~] Bangun row sesuai urutan schema. — Encoder mengurutkan berdasarkan schema, tetapi default value belum diterapkan.
 - [~] Validasi tipe dan nullability. — Validasi dasar ada; duplicate insert column dan integer overflow belum ditolak.
-- [x] Tulis row ke storage append-only.
+- [x] Tulis row ke clustered leaf: append fisik di `FreeStart`, urutan logis dijaga melalui `FirstRecordOffset`/`NextOffset`.
 - [ ] Kembalikan jumlah row yang ditambahkan.
 
 ### SELECT
 
-- [~] Sequential scan tabel. — Berfungsi untuk seluruh kolom; projection parsial masih merusak posisi baca.
+- [x] Sequential scan single-leaf melalui chain record sudah berfungsi untuk seluruh kolom.
 - [ ] Filter row.
 - [x] Projection semua kolom.
-- [~] Projection kolom tertentu dan urutan kolom hasil. — Ada validasi, tetapi decoder tidak skip payload dan output mengikuti urutan schema, bukan urutan query.
+- [~] Projection kolom tertentu dan urutan kolom hasil. — Decoder record sudah membaca payload penuh; perilaku projection/urutan query masih perlu diuji dan dirapikan.
 - [x] Format nama kolom dan nilai hasil.
 
 ### UPDATE
@@ -393,20 +408,21 @@ Fitur ini penting sebelum database disebut cukup aman, walau belum memiliki tran
 
 ## Urutan kerja terdekat
 
-Kerjakan dalam urutan ini agar tidak mencampur terlalu banyak konsep:
+Kerjakan dalam urutan ini agar konsep tree bertambah satu lapis pada satu waktu:
 
-1. [ ] Tambah test lexer trailing whitespace dan perbaiki panic.
-2. [ ] Tambah round-trip test row untuk seluruh tipe dan NULL.
-3. [ ] Perbaiki decoder agar selalu membaca seluruh row sebelum projection.
-4. [ ] Tambah sintaks `PRIMARY KEY` dan metadata catalog.
-5. [ ] Buat package/storage types untuk `PageID`, page header, meta page, read page, dan write page.
-6. [ ] Buat satu leaf root tanpa split dan integrasikan `Find` + `Insert` langsung melalui API storage.
-7. [ ] Implementasikan leaf split dan root split.
-8. [ ] Implementasikan recursive internal split.
-9. [ ] Ganti `Executor.Insert` append-only menjadi insert ke clustered tree.
-10. [ ] Ganti sequential `SELECT` menjadi leaf-chain scan; tambahkan PK lookup setelah filter AST tersedia.
+1. [ ] Tambahkan automated test insert single-leaf: kosong, depan, tengah, belakang, duplicate, NULL/NOT NULL, dan reopen.
+2. [ ] Pastikan root leaf memakai invariant `ParentID = InvalidPageID` dan `Level = 0`.
+3. [ ] Tegakkan kontrak PK v1 saat `CREATE TABLE`: tepat satu PK, `INT`, `NOT NULL`.
+4. [ ] Tambahkan test yang sengaja memenuhi leaf sampai `recordEnd > PageSize`.
+5. [ ] Implementasikan **leaf split** menjadi leaf kiri + leaf kanan.
+6. [ ] Ketika root leaf split, buat **root internal baru** dan update `MetaPage.RootPageID`.
+7. [ ] Tentukan format entry internal dan implementasikan traversal `root → ... → leaf`.
+8. [ ] Implementasikan insert separator ke internal page.
+9. [ ] Implementasikan internal split dan recursive parent split.
+10. [ ] Tentukan mekanisme scan antar-leaf dan perluas `SELECT *` menjadi full scan multi-leaf.
+11. [ ] Setelah tree multi-level stabil, tambahkan `SELECT ... WHERE pk = value`.
 
-Jangan mulai secondary index, planner, buffer pool, atau WAL sebelum langkah 1–8 lulus test.
+Jangan mulai secondary index, planner, buffer pool, atau WAL sebelum leaf split, internal traversal, dan recursive root handling stabil.
 
 ## Urutan demo akhir
 
@@ -462,6 +478,13 @@ Untuk setiap item:
 - Unique index memiliki paling banyak satu record untuk setiap key yang dianggap setara.
 - Index scan dan table scan memberi hasil logis yang sama.
 - Error tidak boleh meninggalkan perubahan setengah jadi yang dianggap sukses.
+- `MetaPage.RootPageID` selalu menunjuk root B+ tree yang aktif.
+- Leaf root pada tree satu-level memiliki `Level = 0` dan `ParentID = InvalidPageID`.
+- `FirstRecordOffset = 0` berarti leaf kosong.
+- `Record.NextOffset = 0` berarti record tersebut tail/end dalam urutan logis leaf.
+- `FreeStart` menunjuk byte pertama yang boleh dipakai untuk append fisik record baru.
+- Urutan record yang dicapai dari `FirstRecordOffset` melalui `NextOffset` harus selalu ascending berdasarkan primary key.
+- Posisi fisik record di page boleh berbeda dari urutan logis primary key.
 
 ## Setelah versi pertama selesai
 

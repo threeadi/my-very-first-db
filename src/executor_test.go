@@ -103,3 +103,80 @@ func createEmptyTree(path string) error {
 
 	return nil
 }
+
+func TestInsertSingleLeafOrdered(t *testing.T) {
+	tempDir := t.TempDir()
+	defer os.RemoveAll(tempDir)
+	config := &Config{
+		DataDirectory: tempDir + string(os.PathSeparator),
+		CatalogPath:   filepath.Join(tempDir, "catalog.json"),
+	}
+	catalog := NewCatalog() // sesuaikan dengan constructor-mu
+	executor := NewExecutor(config, catalog)
+	err := executor.CreateDatabase(CreateDatabaseStatement{
+		DBName: "testdb",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = executor.CreateTable(CreateTableStatement{
+		DBName: "testdb",
+		Table:  "users",
+		Columns: []ColumnDef{
+			{
+				Name:      "id",
+				ValueType: IntType,
+				Primary:   true,
+				Nullable:  false,
+			},
+			{
+				Name:      "name",
+				ValueType: VarcharType,
+				Nullable:  false,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// insert: 10, 20, 5, 15
+	values := []struct {
+		id   string
+		name string
+	}{
+		{"10", "sepuluh"},
+		{"20", "dua puluh"},
+		{"5", "lima"},
+		{"15", "lima belas"},
+	}
+
+	for _, v := range values {
+		err := executor.Insert(InsertStatement{
+			DBName: "testdb",
+			Table:  "users",
+			Values: []string{v.id, v.name},
+		})
+
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// scan leaf
+	result, err := executor.Select(SelectStatement{
+		DBName:  "testdb",
+		Table:   "users",
+		Columns: []string{"*"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := []int32{5, 10, 15, 20}
+	assert.Equal(t, len(expected), len(result.Records))
+	for i, expectedPK := range expected {
+		got := result.Records[i][0].Value
+		assert.Equal(t, expectedPK, got)
+	}
+}
