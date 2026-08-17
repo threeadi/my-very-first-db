@@ -1,6 +1,6 @@
 # Roadmap Belajar Go: Membuat RDBMS Mini
 
-Dokumen ini adalah peta belajar dan checklist. Semua implementasi Go harus ditulis sendiri oleh pemilik proyek.
+Dokumen ini adalah peta belajar dan checklist.
 
 ## Status audit — 15 Agustus 2026
 
