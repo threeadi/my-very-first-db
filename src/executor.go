@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -215,7 +216,6 @@ func (x *Executor) Insert(stmt InsertStatement) error {
 		return errors.New("primary key tidak ditemukan")
 	}
 
-	// Validasi: apa stmt.Columns yang di-INSERT itu match sama kolom yang ada di skema?
 	for i, col := range insertColumns {
 		colDef, ok := columnsMap[col]
 		if !ok {
@@ -266,7 +266,6 @@ func (x *Executor) Insert(stmt InsertStatement) error {
 	}
 	defer pager.Close()
 
-	// baca meta page
 	metaRaw, err := pager.ReadPage(0)
 	if err != nil {
 		return err
@@ -282,7 +281,11 @@ func (x *Executor) Insert(stmt InsertStatement) error {
 		return err
 	}
 
-	head, err := DecodeIndexPageHeader(rootPage)
+	page, err := x.targetPage(pager, rootPage, newPK)
+	if err != nil {
+		return err
+	}
+	head, err := DecodeIndexPageHeader(page)
 	if err != nil {
 		return err
 	}
@@ -291,7 +294,7 @@ func (x *Executor) Insert(stmt InsertStatement) error {
 	var prevOffset uint16
 	currentOffset := head.FirstRecordOffset
 	for currentOffset != 0 {
-		record, _, nextOffset, _, err := decodeRecord(columns, rootPage.Data[currentOffset:])
+		record, _, nextOffset, _, err := decodeRecord(columns, page.Data[currentOffset:])
 		if err != nil {
 			return err
 		}
@@ -310,27 +313,39 @@ func (x *Executor) Insert(stmt InsertStatement) error {
 		currentOffset = nextOffset
 	}
 
-	// Encode row jadi bytes
 	encodedRecord, err := encodeRecord(columns, parsedValues, currentOffset)
 	if err != nil {
 		return err
+	}
+
+	if IndexPageHeaderSize+len(encodedRecord) > int(PageSize) {
+		return ErrValueOutOfRange
 	}
 
 	recordOffset := head.FreeStart
 	recordEnd := int(recordOffset) + len(encodedRecord)
 
 	if recordEnd > int(PageSize) {
-		return errors.New("record tidak muat di leaf page")
+		// splitRootLeaf HANYA boleh untuk tree yang root-nya masih leaf.
+		rootHead, err := DecodeIndexPageHeader(rootPage)
+		if err != nil {
+			return err
+		}
+		if rootHead.PageType != PageTypeLeaf {
+			return errors.New("split non-root leaf belum diimplementasikan")
+		}
+
+		return x.splitRootLeaf(pager, page, columns, pkColIdx, newPK, parsedValues)
 	}
 
-	copy(rootPage.Data[int(recordOffset):recordEnd], encodedRecord)
+	copy(page.Data[int(recordOffset):recordEnd], encodedRecord)
 	if prevOffset == 0 {
 		head.FirstRecordOffset = recordOffset
 	} else {
 		nextOffsetPos := int(prevOffset) + recordNextOffsetPosition(columns)
 
 		binary.LittleEndian.PutUint16(
-			rootPage.Data[nextOffsetPos:nextOffsetPos+2],
+			page.Data[nextOffsetPos:nextOffsetPos+2],
 			recordOffset,
 		)
 	}
@@ -338,8 +353,8 @@ func (x *Executor) Insert(stmt InsertStatement) error {
 	head.RecordCount++
 	head.FreeStart = uint16(recordEnd)
 
-	EncodeIndexPageHeader(rootPage, head)
-	if err := pager.WritePage(rootPage); err != nil {
+	EncodeIndexPageHeader(page, head)
+	if err := pager.WritePage(page); err != nil {
 		return err
 	}
 
@@ -970,4 +985,407 @@ func recordNextOffsetPosition(cols []ColumnDef) int {
 	flagSize := 1
 
 	return varlenMetadataSize + nullBitmapSize + flagSize
+}
+
+func (x *Executor) splitRootLeaf(
+	pager *Pager,
+	rootPage *Page,
+	columns []ColumnDef,
+	pkColIdx int,
+	newPK int32,
+	parsedValues []ParsedValue,
+) error {
+	records, err := readLeafRecords(
+		rootPage,
+		columns,
+		pkColIdx,
+	)
+	if err != nil {
+		return err
+	}
+
+	newRecordData, err := encodeRecord(
+		columns,
+		parsedValues,
+		0,
+	)
+	if err != nil {
+		return err
+	}
+
+	records = append(records, LeafRecord{
+		PK:   newPK,
+		Data: newRecordData,
+	})
+
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].PK < records[j].PK
+	})
+
+	if len(records) < 2 {
+		return errors.New("tidak cukup record untuk split")
+	}
+
+	middle := len(records) / 2
+
+	leftRecords := records[:middle]
+	rightRecords := records[middle:]
+
+	if len(leftRecords) == 0 || len(rightRecords) == 0 {
+		return errors.New("invalid leaf split")
+	}
+
+	// =====================================================
+	// PAGE 1 = LEFT LEAF
+	// =====================================================
+
+	if err := rewriteLeaf(
+		rootPage,
+		leftRecords,
+		columns,
+	); err != nil {
+		return err
+	}
+
+	// =====================================================
+	// PAGE 2 = RIGHT LEAF
+	// =====================================================
+
+	rightPage, err := pager.AllocatePage()
+	if err != nil {
+		return err
+	}
+
+	rightHeader := IndexPageHeader{
+		PageType:          PageTypeLeaf,
+		PageID:            rightPage.ID,
+		ParentID:          InvalidPageID, // sementara
+		Level:             0,
+		RecordCount:       0,
+		FirstRecordOffset: 0,
+		FreeStart:         IndexPageHeaderSize,
+	}
+
+	EncodeIndexPageHeader(rightPage, rightHeader)
+
+	if err := rewriteLeaf(
+		rightPage,
+		rightRecords,
+		columns,
+	); err != nil {
+		return err
+	}
+
+	// IMPORTANT:
+	// write Page2 dulu supaya file membesar.
+	if err := pager.WritePage(rightPage); err != nil {
+		return err
+	}
+
+	// =====================================================
+	// PAGE 3 = NEW INTERNAL ROOT
+	// =====================================================
+
+	parentPage, err := pager.AllocatePage()
+	if err != nil {
+		return err
+	}
+
+	separatorKey := rightRecords[0].PK
+
+	headerParent := IndexPageHeader{
+		PageType:          PageTypeInternal,
+		PageID:            parentPage.ID,
+		ParentID:          InvalidPageID,
+		Level:             1,
+		RecordCount:       1,
+		FirstRecordOffset: 0,
+
+		// Header 17
+		// + FirstChild 4
+		// + separator 4
+		// + RightChild 4
+		FreeStart: IndexPageHeaderSize + 12,
+	}
+
+	EncodeIndexPageHeader(parentPage, headerParent)
+
+	offset := IndexPageHeaderSize
+
+	// FirstChildPageID = left leaf
+	binary.LittleEndian.PutUint32(
+		parentPage.Data[offset:offset+4],
+		uint32(rootPage.ID),
+	)
+	offset += 4
+
+	// separator key
+	binary.LittleEndian.PutUint32(
+		parentPage.Data[offset:offset+4],
+		uint32(separatorKey),
+	)
+	offset += 4
+
+	// RightChildPageID = right leaf
+	binary.LittleEndian.PutUint32(
+		parentPage.Data[offset:offset+4],
+		uint32(rightPage.ID),
+	)
+
+	// =====================================================
+	// Kedua leaf sekarang punya parent = Page3
+	// =====================================================
+
+	leftHeader, err := DecodeIndexPageHeader(rootPage)
+	if err != nil {
+		return err
+	}
+
+	leftHeader.ParentID = parentPage.ID
+	leftHeader.Level = 0
+
+	EncodeIndexPageHeader(rootPage, leftHeader)
+
+	rightHeader, err = DecodeIndexPageHeader(rightPage)
+	if err != nil {
+		return err
+	}
+
+	rightHeader.ParentID = parentPage.ID
+	rightHeader.Level = 0
+
+	EncodeIndexPageHeader(rightPage, rightHeader)
+
+	// =====================================================
+	// Persist pages
+	// =====================================================
+
+	if err := pager.WritePage(rootPage); err != nil {
+		return err
+	}
+
+	if err := pager.WritePage(rightPage); err != nil {
+		return err
+	}
+
+	if err := pager.WritePage(parentPage); err != nil {
+		return err
+	}
+
+	// =====================================================
+	// Meta sekarang menunjuk INTERNAL ROOT baru
+	// =====================================================
+
+	metaPage, err := pager.ReadPage(0)
+	if err != nil {
+		return err
+	}
+
+	meta, err := DecodeMetaPage(metaPage)
+	if err != nil {
+		return err
+	}
+
+	meta.RootPageID = parentPage.ID
+
+	metaPage = EncodeMetaPage(meta)
+
+	if err := pager.WritePage(metaPage); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+type LeafRecord struct {
+	PK   int32
+	Data []byte
+}
+
+func readLeafRecords(
+	page *Page,
+	columns []ColumnDef,
+	pkColIdx int,
+) ([]LeafRecord, error) {
+	head, err := DecodeIndexPageHeader(page)
+	if err != nil {
+		return nil, err
+	}
+
+	records := make([]LeafRecord, 0, head.RecordCount)
+	currentOffset := head.FirstRecordOffset
+
+	for currentOffset != 0 {
+		// 1. Decode record untuk mengetahui:
+		//    - nilai PK
+		//    - NextOffset
+		//    - ukuran record
+		record, _, nextOffset, recordSize, err := decodeRecord(
+			columns,
+			page.Data[currentOffset:],
+		)
+		if err != nil {
+			return nil, err
+		}
+		pk, ok := record[pkColIdx].Value.(int32)
+		if !ok {
+			return nil, ErrInvalidDataType
+		}
+		endRecord := int(currentOffset) + recordSize
+		if endRecord > int(PageSize) {
+			return nil, ErrCorruptTableFile
+		}
+		raw := make([]byte, recordSize)
+		copy(raw, page.Data[int(currentOffset):endRecord])
+
+		records = append(records, LeafRecord{
+			PK:   pk,
+			Data: raw,
+		})
+
+		currentOffset = nextOffset
+	}
+
+	return records, nil
+}
+
+// 1. decode IndexPageHeader
+// 2. kosongkan area record page
+// 3. reset:
+//    RecordCount = 0
+//    FirstRecordOffset = 0
+//    FreeStart = 17
+
+// 4. loop records
+//    ↓
+//    tulis record ke FreeStart
+//    ↓
+//    patch NextOffset record sebelumnya
+//    ↓
+//    advance FreeStart
+
+// 5. record terakhir:
+//    NextOffset = 0
+
+// 6. encode header kembali
+func rewriteLeaf(page *Page, records []LeafRecord, columns []ColumnDef) error {
+	header, err := DecodeIndexPageHeader(page)
+	if err != nil {
+		return err
+	}
+	page.Data = [PageSize]byte{}
+	header.RecordCount = 0
+	header.FirstRecordOffset = 0
+	header.FreeStart = IndexPageHeaderSize
+
+	// Empty leaf valid.
+	if len(records) == 0 {
+		EncodeIndexPageHeader(page, header)
+		return nil
+	}
+
+	offsets := make([]uint16, len(records))
+	currentOffset := uint16(IndexPageHeaderSize)
+	for i, r := range records {
+		recordEnd := int(currentOffset) + len(r.Data)
+		if recordEnd > int(PageSize) {
+			return errors.New("record tidak muat di leaf page")
+		}
+
+		offsets[i] = currentOffset
+		currentOffset = uint16(recordEnd)
+	}
+
+	header.FirstRecordOffset = offsets[0]
+	nextOffsetPos := recordNextOffsetPosition(columns)
+
+	for i, r := range records {
+		rOffset := offsets[i]
+		recordEnd := int(rOffset) + len(r.Data)
+
+		copy(page.Data[rOffset:recordEnd], r.Data)
+
+		var nextOffset uint16
+
+		if i+1 < len(records) {
+			nextOffset = offsets[i+1]
+		}
+
+		pos := int(rOffset) + nextOffsetPos
+		binary.LittleEndian.PutUint16(
+			page.Data[pos:pos+2],
+			nextOffset,
+		)
+
+		header.RecordCount++
+	}
+	header.FreeStart = currentOffset
+	EncodeIndexPageHeader(page, header)
+	return nil
+}
+
+func (x *Executor) targetPage(pager *Pager, parent *Page, newPK int32) (*Page, error) {
+	head, err := DecodeIndexPageHeader(parent)
+	if err != nil {
+		return nil, err
+	}
+
+	if head.PageType == PageTypeLeaf {
+		return parent, nil
+	}
+
+	if head.PageType != PageTypeInternal {
+		return nil, ErrCorruptTableFile
+	}
+
+	offset := IndexPageHeaderSize
+
+	// Left child
+	var leftPageID uint32
+
+	_, err = binary.Decode(
+		parent.Data[offset:offset+4],
+		binary.LittleEndian,
+		&leftPageID,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	offset += 4
+
+	var separator int32
+
+	_, err = binary.Decode(parent.Data[offset:offset+4], binary.LittleEndian, &separator)
+	if err != nil {
+		return nil, err
+	}
+
+	offset += 4
+
+	var rightPageID uint32
+
+	_, err = binary.Decode(
+		parent.Data[offset:offset+4],
+		binary.LittleEndian,
+		&rightPageID,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	var childID PageID
+
+	if newPK < separator {
+		childID = PageID(leftPageID)
+	} else {
+		childID = PageID(rightPageID)
+	}
+
+	child, err := pager.ReadPage(childID)
+	if err != nil {
+		return nil, err
+	}
+
+	return x.targetPage(pager, child, newPK)
 }
