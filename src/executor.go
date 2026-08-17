@@ -407,7 +407,7 @@ func (x *Executor) Select(stmt SelectStatement) (ResultSet, error) {
 		return ResultSet{}, err
 	}
 
-	records, err := x.scanLeaf(rootPage, columns)
+	records, err := x.scanTree(pager, rootPage, columns)
 	if err != nil {
 		return ResultSet{}, err
 	}
@@ -415,6 +415,62 @@ func (x *Executor) Select(stmt SelectStatement) (ResultSet, error) {
 	resultSet.Records = records
 
 	return resultSet, nil
+}
+
+func (x *Executor) scanTree(pager *Pager, page *Page, columns []ColumnDef) ([]Record, error) {
+	head, err := DecodeIndexPageHeader(page)
+	if err != nil {
+		return nil, err
+	}
+
+	switch head.PageType {
+	case PageTypeLeaf:
+		return x.scanLeaf(page, columns)
+
+	case PageTypeInternal:
+		offset := IndexPageHeaderSize
+
+		leftPageID := PageID(
+			binary.LittleEndian.Uint32(
+				page.Data[offset : offset+4],
+			),
+		)
+
+		offset += 4
+
+		offset += 4
+
+		rightPageID := PageID(
+			binary.LittleEndian.Uint32(
+				page.Data[offset : offset+4],
+			),
+		)
+
+		leftPage, err := pager.ReadPage(leftPageID)
+		if err != nil {
+			return nil, err
+		}
+
+		rightPage, err := pager.ReadPage(rightPageID)
+		if err != nil {
+			return nil, err
+		}
+
+		leftRecords, err := x.scanTree(pager, leftPage, columns)
+		if err != nil {
+			return nil, err
+		}
+
+		rightRecords, err := x.scanTree(pager, rightPage, columns)
+		if err != nil {
+			return nil, err
+		}
+
+		return append(leftRecords, rightRecords...), nil
+
+	default:
+		return nil, ErrCorruptTableFile
+	}
 }
 
 func (x *Executor) scanLeaf(page *Page, columns []ColumnDef) ([]Record, error) {

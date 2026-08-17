@@ -113,7 +113,7 @@ func TestInsertSingleLeafOrdered(t *testing.T) {
 		DataDirectory: tempDir + string(os.PathSeparator),
 		CatalogPath:   filepath.Join(tempDir, "catalog.json"),
 	}
-	catalog := NewCatalog() 
+	catalog := NewCatalog()
 	executor := NewExecutor(config, catalog)
 	err := executor.CreateDatabase(CreateDatabaseStatement{
 		DBName: "testdb",
@@ -408,4 +408,16 @@ func TestInsertSplitRootLeaf(t *testing.T) {
 	assert.Equal(t, rightRecords[0].PK, int32(30))
 	assert.Equal(t, rightRecords[1].PK, int32(40))
 	assert.Equal(t, rightRecords[2].PK, int32(50))
+
+	selectCols := []string{"*"}
+	result, err := executor.Select(SelectStatement{
+		DBName:  "testdb",
+		Table:   "users",
+		Columns: selectCols,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assert.Equal(t, len(ids), len(result.Records))
 }
