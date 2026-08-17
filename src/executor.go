@@ -41,6 +41,16 @@ type ParsedValue struct {
 
 const maxStringLength uint32 = 16 * 1024 * 1024
 
+type LeafRecord struct {
+	PK   int32
+	Data []byte
+}
+
+type InternalCell struct {
+	SeparatorKey int32
+	ChildPageID  PageID
+}
+
 type Executor struct {
 	config  *Config
 	catalog *Catalog
@@ -326,16 +336,16 @@ func (x *Executor) Insert(stmt InsertStatement) error {
 	recordEnd := int(recordOffset) + len(encodedRecord)
 
 	if recordEnd > int(PageSize) {
-		// splitRootLeaf HANYA boleh untuk tree yang root-nya masih leaf.
 		rootHead, err := DecodeIndexPageHeader(rootPage)
 		if err != nil {
 			return err
 		}
-		if rootHead.PageType != PageTypeLeaf {
-			return errors.New("split non-root leaf belum diimplementasikan")
+
+		if rootHead.PageType == PageTypeLeaf {
+			return x.splitRootLeaf(pager, page, columns, pkColIdx, newPK, parsedValues)
 		}
 
-		return x.splitRootLeaf(pager, page, columns, pkColIdx, newPK, parsedValues)
+		return x.splitLeaf(pager, page, columns, pkColIdx, newPK, parsedValues)
 	}
 
 	copy(page.Data[int(recordOffset):recordEnd], encodedRecord)
@@ -428,45 +438,32 @@ func (x *Executor) scanTree(pager *Pager, page *Page, columns []ColumnDef) ([]Re
 		return x.scanLeaf(page, columns)
 
 	case PageTypeInternal:
-		offset := IndexPageHeaderSize
-
-		leftPageID := PageID(
-			binary.LittleEndian.Uint32(
-				page.Data[offset : offset+4],
-			),
-		)
-
-		offset += 4
-
-		offset += 4
-
-		rightPageID := PageID(
-			binary.LittleEndian.Uint32(
-				page.Data[offset : offset+4],
-			),
-		)
-
-		leftPage, err := pager.ReadPage(leftPageID)
+		firstPageID, cells, err := readInternalCells(page)
 		if err != nil {
 			return nil, err
 		}
+		var childIDs []PageID = make([]PageID, 0, len(cells)+1)
+		childIDs = append(childIDs, firstPageID)
 
-		rightPage, err := pager.ReadPage(rightPageID)
-		if err != nil {
-			return nil, err
+		for _, cell := range cells {
+			childIDs = append(childIDs, cell.ChildPageID)
 		}
 
-		leftRecords, err := x.scanTree(pager, leftPage, columns)
-		if err != nil {
-			return nil, err
+		var records []Record
+
+		for _, id := range childIDs {
+			page, err = pager.ReadPage(id)
+			if err != nil {
+				return nil, err
+			}
+			result, err := x.scanTree(pager, page, columns)
+			if err != nil {
+				return nil, err
+			}
+			records = append(records, result...)
 		}
 
-		rightRecords, err := x.scanTree(pager, rightPage, columns)
-		if err != nil {
-			return nil, err
-		}
-
-		return append(leftRecords, rightRecords...), nil
+		return records, nil
 
 	default:
 		return nil, ErrCorruptTableFile
@@ -1043,6 +1040,99 @@ func recordNextOffsetPosition(cols []ColumnDef) int {
 	return varlenMetadataSize + nullBitmapSize + flagSize
 }
 
+func (x *Executor) splitLeaf(
+	pager *Pager,
+	leafPage *Page,
+	cols []ColumnDef,
+	pkColIdx int,
+	newPK int32,
+	parsedValues []ParsedValue,
+) error {
+	leafHeader, err := DecodeIndexPageHeader(leafPage)
+	if err != nil {
+		return err
+	}
+
+	if leafHeader.PageType != PageTypeLeaf {
+		return ErrCorruptTableFile
+	}
+
+	if leafHeader.ParentID == InvalidPageID {
+		return errors.New("splitLeaf tidak untuk root leaf")
+	}
+
+	records, err := readLeafRecords(leafPage, cols, pkColIdx)
+	if err != nil {
+		return err
+	}
+
+	newRecordData, err := encodeRecord(cols, parsedValues, 0)
+	if err != nil {
+		return err
+	}
+	records = append(records, LeafRecord{
+		PK:   newPK,
+		Data: newRecordData,
+	})
+
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].PK < records[j].PK
+	})
+
+	mid := len(records) / 2
+
+	leftRecords := records[:mid]
+	rightRecords := records[mid:]
+
+	if err = rewriteLeaf(leafPage, leftRecords, cols); err != nil {
+		return err
+	}
+
+	rightPage, err := pager.AllocatePage()
+	if err != nil {
+		return err
+	}
+
+	rightHeader := IndexPageHeader{
+		PageType:          PageTypeLeaf,
+		PageID:            rightPage.ID,
+		ParentID:          leafHeader.ParentID,
+		Level:             0,
+		RecordCount:       0,
+		FirstRecordOffset: 0,
+		FreeStart:         IndexPageHeaderSize,
+	}
+
+	EncodeIndexPageHeader(rightPage, rightHeader)
+	if err = rewriteLeaf(rightPage, rightRecords, cols); err != nil {
+		return err
+	}
+
+	separatorKey := rightRecords[0].PK
+	parentPage, err := pager.ReadPage(leafHeader.ParentID)
+	if err != nil {
+		return err
+	}
+
+	if err = insertInternalCell(parentPage, separatorKey, rightPage.ID); err != nil {
+		return err
+	}
+
+	if err := pager.WritePage(rightPage); err != nil {
+		return err
+	}
+
+	if err := pager.WritePage(parentPage); err != nil {
+		return err
+	}
+
+	if err = pager.WritePage(leafPage); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (x *Executor) splitRootLeaf(
 	pager *Pager,
 	rootPage *Page,
@@ -1051,20 +1141,12 @@ func (x *Executor) splitRootLeaf(
 	newPK int32,
 	parsedValues []ParsedValue,
 ) error {
-	records, err := readLeafRecords(
-		rootPage,
-		columns,
-		pkColIdx,
-	)
+	records, err := readLeafRecords(rootPage, columns, pkColIdx)
 	if err != nil {
 		return err
 	}
 
-	newRecordData, err := encodeRecord(
-		columns,
-		parsedValues,
-		0,
-	)
+	newRecordData, err := encodeRecord(columns, parsedValues, 0)
 	if err != nil {
 		return err
 	}
@@ -1095,11 +1177,7 @@ func (x *Executor) splitRootLeaf(
 	// PAGE 1 = LEFT LEAF
 	// =====================================================
 
-	if err := rewriteLeaf(
-		rootPage,
-		leftRecords,
-		columns,
-	); err != nil {
+	if err := rewriteLeaf(rootPage, leftRecords, columns); err != nil {
 		return err
 	}
 
@@ -1133,7 +1211,7 @@ func (x *Executor) splitRootLeaf(
 	}
 
 	// IMPORTANT:
-	// write Page2 dulu supaya file membesar.
+	// write Page2 dulu supaya file membesar karena page allocation berdasarkan file size .
 	if err := pager.WritePage(rightPage); err != nil {
 		return err
 	}
@@ -1251,11 +1329,6 @@ func (x *Executor) splitRootLeaf(
 	}
 
 	return nil
-}
-
-type LeafRecord struct {
-	PK   int32
-	Data []byte
 }
 
 func readLeafRecords(
@@ -1394,48 +1467,23 @@ func (x *Executor) targetPage(pager *Pager, parent *Page, newPK int32) (*Page, e
 		return nil, ErrCorruptTableFile
 	}
 
-	offset := IndexPageHeaderSize
-
-	// Left child
-	var leftPageID uint32
-
-	_, err = binary.Decode(
-		parent.Data[offset:offset+4],
-		binary.LittleEndian,
-		&leftPageID,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	offset += 4
-
-	var separator int32
-
-	_, err = binary.Decode(parent.Data[offset:offset+4], binary.LittleEndian, &separator)
-	if err != nil {
-		return nil, err
-	}
-
-	offset += 4
-
-	var rightPageID uint32
-
-	_, err = binary.Decode(
-		parent.Data[offset:offset+4],
-		binary.LittleEndian,
-		&rightPageID,
-	)
-	if err != nil {
-		return nil, err
-	}
-
 	var childID PageID
 
-	if newPK < separator {
-		childID = PageID(leftPageID)
-	} else {
-		childID = PageID(rightPageID)
+	firstChild, cells, err := readInternalCells(parent)
+	if err != nil {
+		return nil, err
+	}
+
+	childID = firstChild
+	for _, cell := range cells {
+		if newPK < cell.SeparatorKey {
+			break
+		}
+		childID = cell.ChildPageID
+	}
+
+	if childID <= 0 {
+		return nil, ErrCorruptTableFile
 	}
 
 	child, err := pager.ReadPage(childID)
@@ -1444,4 +1492,117 @@ func (x *Executor) targetPage(pager *Pager, parent *Page, newPK int32) (*Page, e
 	}
 
 	return x.targetPage(pager, child, newPK)
+}
+
+func readInternalCells(page *Page) (firstChild PageID, cells []InternalCell, err error) {
+	head, err := DecodeIndexPageHeader(page)
+	if err != nil {
+		return firstChild, nil, err
+	}
+
+	if head.PageType != PageTypeInternal {
+		return firstChild, nil, ErrCorruptTableFile
+	}
+
+	offset := IndexPageHeaderSize
+
+	if offset+4 > int(PageSize) {
+		return 0, nil, ErrCorruptTableFile
+	}
+
+	firstChild = PageID(
+		binary.LittleEndian.Uint32(
+			page.Data[offset : offset+4],
+		),
+	)
+	offset += 4
+
+	cells = make([]InternalCell, 0, head.RecordCount)
+	for i := 0; i < int(head.RecordCount); i++ {
+		if offset+8 > int(PageSize) {
+			return 0, nil, ErrCorruptTableFile
+		}
+
+		sep := int32(binary.LittleEndian.Uint32(page.Data[offset : offset+4]))
+		offset += 4
+		child := PageID(binary.LittleEndian.Uint32(page.Data[offset : offset+4]))
+		offset += 4
+		cells = append(cells, InternalCell{
+			SeparatorKey: sep,
+			ChildPageID:  child,
+		})
+	}
+
+	return firstChild, cells, nil
+}
+
+func rewriteInternal(page *Page, firstChild PageID, cells []InternalCell) error {
+	header, err := DecodeIndexPageHeader(page)
+	if err != nil {
+		return err
+	}
+	if header.PageType != PageTypeInternal {
+		return ErrCorruptTableFile
+	}
+
+	if firstChild == 0 {
+		return ErrCorruptTableFile
+	}
+	requiredSize := IndexPageHeaderSize + 4 + (len(cells) * 8)
+
+	if requiredSize > int(PageSize) {
+		return errors.New("internal page penuh")
+	}
+
+	page.Data = [PageSize]byte{}
+	header.RecordCount = uint16(len(cells))
+	header.FirstRecordOffset = 0
+	header.FreeStart = uint16(requiredSize)
+
+	offset := IndexPageHeaderSize
+	binary.LittleEndian.PutUint32(page.Data[offset:offset+4], uint32(firstChild))
+	offset += 4
+
+	for _, cell := range cells {
+		// separator
+		binary.LittleEndian.PutUint32(
+			page.Data[offset:offset+4],
+			uint32(cell.SeparatorKey),
+		)
+
+		offset += 4
+
+		binary.LittleEndian.PutUint32(
+			page.Data[offset:offset+4],
+			uint32(cell.ChildPageID),
+		)
+
+		offset += 4
+	}
+	EncodeIndexPageHeader(page, header)
+	return nil
+}
+
+func insertInternalCell(page *Page, separatorKey int32, childPageID PageID) error {
+	firstChild, cells, err := readInternalCells(page)
+	if err != nil {
+		return err
+	}
+
+	for _, cell := range cells {
+		if cell.SeparatorKey == separatorKey {
+			return fmt.Errorf("duplicate internal separator: %d", separatorKey)
+		}
+	}
+
+	cells = append(cells, InternalCell{
+		SeparatorKey: separatorKey,
+		ChildPageID:  childPageID,
+	})
+
+	sort.Slice(cells, func(i, j int) bool {
+		return cells[i].SeparatorKey < cells[j].SeparatorKey
+	})
+
+	return rewriteInternal(page, firstChild, cells)
 }

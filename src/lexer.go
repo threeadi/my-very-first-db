@@ -76,6 +76,8 @@ func (l *Lexer) NextToken() (Token, error) {
 			Type:    RPAREN,
 			Literal: ")",
 		}
+	case ';':
+		token = Token{Type: DELIMITER, Literal: ";"}
 	case '\'':
 		str, err := l.readString(ch)
 		if err != nil {

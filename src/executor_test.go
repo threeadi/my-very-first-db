@@ -286,17 +286,16 @@ func TestInsertSplitRootLeaf(t *testing.T) {
 		}
 	}
 
-	path := filepath.Join(
-		config.DataDirectory,
-		"testdb",
-		"users.3tbl",
-	)
+	path := filepath.Join(config.DataDirectory, "testdb", "users.3tbl")
 
 	pager, err := OpenPager(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pager.Close()
+	defer func() {
+		pager.Close()
+		os.RemoveAll(path)
+	}()
 
 	metaPage, err := pager.ReadPage(PageID(0))
 	if err != nil {
@@ -420,4 +419,145 @@ func TestInsertSplitRootLeaf(t *testing.T) {
 	}
 
 	assert.Equal(t, len(ids), len(result.Records))
+}
+
+func TestInsertSplitLeafSameRoot(t *testing.T) {
+	tempDir := t.TempDir()
+	config := &Config{
+		DataDirectory: tempDir + string(os.PathSeparator),
+		CatalogPath:   filepath.Join(tempDir, "catalog.json"),
+	}
+
+	catalog := NewCatalog()
+	executor := NewExecutor(config, catalog)
+	err := executor.CreateDatabase(CreateDatabaseStatement{
+		DBName: "testdb",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = executor.CreateTable(CreateTableStatement{
+		DBName: "testdb",
+		Table:  "users",
+		Columns: []ColumnDef{
+			{
+				Name:      "id",
+				ValueType: IntType,
+				Primary:   true,
+				Nullable:  false,
+			},
+			{
+				Name:      "name",
+				ValueType: VarcharType,
+				Nullable:  false,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	largeValue := strings.Repeat("a", 1000)
+
+	// 9 record dalam 4 page berbeda
+	ids := []string{
+		"10", // page 1
+		"20", //page 1
+		"30", // |<- separator  (page 2)
+		"40", // | page 2
+		"50", //  <- separator (page 4)
+		"60", // | page 4
+		"70", // | <- separator (page 5)
+		"80", // | page 5
+		"90", // page 5
+	}
+	for _, id := range ids {
+		err := executor.Insert(InsertStatement{
+			DBName: "testdb",
+			Table:  "users",
+			Values: []string{
+				id,
+				largeValue,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	path := filepath.Join(config.DataDirectory, "testdb", "users.3tbl")
+
+	pager, err := OpenPager(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() {
+		pager.Close()
+		os.RemoveAll(path)
+	}()
+
+	metaPage, err := pager.ReadPage(PageID(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	meta, err := DecodeMetaPage(metaPage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootPage, err := pager.ReadPage(PageID(meta.RootPageID))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rootHeader, err := DecodeIndexPageHeader(rootPage)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cells := make([]InternalCell, 0, 3)
+	cells = append(cells, InternalCell{
+		SeparatorKey: 30,
+		ChildPageID:  PageID(2),
+	})
+	cells = append(cells, InternalCell{
+		SeparatorKey: 50,
+		ChildPageID:  PageID(4),
+	})
+	cells = append(cells, InternalCell{
+		SeparatorKey: 70,
+		ChildPageID:  PageID(5),
+	})
+	assert.Equal(t, rootHeader.RecordCount, uint16(3))
+
+	assert.Equal(
+		t,
+		rootHeader.FreeStart,
+		uint16(IndexPageHeaderSize+28),
+	)
+
+	resFirstChildId, resultCells, err := readInternalCells(rootPage)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assert.Equal(t, PageID(1), resFirstChildId)
+	for i, cell := range resultCells {
+		assert.Equal(t, cells[i].SeparatorKey, cell.SeparatorKey)
+		assert.Equal(t, cells[i].ChildPageID, cell.ChildPageID)
+	}
+
+	// test select
+	res, err := executor.Select(SelectStatement{
+		DBName:  "testdb",
+		Table:   "users",
+		Columns: []string{"*"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assert.Equal(t, len(res.Records), len(ids))
 }

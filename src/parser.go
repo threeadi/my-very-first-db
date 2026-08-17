@@ -18,6 +18,7 @@ const (
 	OPERATOR
 	LPAREN
 	RPAREN
+	DELIMITER
 	EOF
 )
 
