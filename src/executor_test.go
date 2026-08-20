@@ -725,7 +725,9 @@ func TestMultiLevelTreeInsertAndSelect(t *testing.T) {
 
 	largeValue := createLargeString()
 
-	for i := 1; i <= 10000; i++ {
+	recordsTotal := 10_000
+	decrementRecords := recordsTotal
+	for i := 1; i <= recordsTotal/2; i++ {
 		err := executor.Insert(
 			InsertStatement{
 				DBName: "testdb",
@@ -739,6 +741,25 @@ func TestMultiLevelTreeInsertAndSelect(t *testing.T) {
 
 		if err != nil {
 			t.Fatalf("insert %d failed: %v", i, err)
+		}
+
+		err = executor.Insert(
+			InsertStatement{
+				DBName: "testdb",
+				Table:  "users",
+				Values: []string{
+					strconv.Itoa(decrementRecords),
+					largeValue,
+				},
+			},
+		)
+
+		if err != nil {
+			t.Fatalf("insert %d failed: %v", i, err)
+		}
+		decrementRecords--
+		if decrementRecords <= recordsTotal/2 {
+			break
 		}
 	}
 
@@ -757,7 +778,6 @@ func TestMultiLevelTreeInsertAndSelect(t *testing.T) {
 		found[pk] = true
 	}
 
-	recordsTotal := 10_000
 	var missing []int32
 	for i := int32(1); i <= int32(recordsTotal); i++ {
 		if !found[i] {
@@ -768,7 +788,6 @@ func TestMultiLevelTreeInsertAndSelect(t *testing.T) {
 	fmt.Println("total missing:", len(missing))
 	if len(missing) > 0 {
 		fmt.Println("first missing:", missing[0], "last missing:", missing[len(missing)-1])
-		// cetak beberapa gap biar kelihatan pola: berurutan / tersebar
 		fmt.Println("sample:", missing[:min(20, len(missing))])
 	}
 

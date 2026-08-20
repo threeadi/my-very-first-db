@@ -23,7 +23,7 @@ Legenda:
 - Insert depan, tengah, dan belakang menggunakan pasangan `prevOffset` / `currentOffset`; predecessor di-patch agar menunjuk ke record baru.
 - Duplicate primary key sudah ditolak dan constraint `NOT NULL` sudah tervalidasi saat insert.
 - **B+ tree multi-level sudah diimplementasikan**: `targetPage()` (traversal root → internal → leaf), `scanTree()` (full scan rekursif leaf+internal), `splitLeaf()` (split leaf non-root + insert separator ke parent), `splitRootLeaf()` (split root leaf → buat root internal baru), dan `splitRootInternal()` (split root internal saat penuh).
-- Format internal page sudah ada: `firstChild` (4 byte) + sel ``InternalCell{SeparatorKey, ChildPageID}`` (8 byte), dibaca/tulis via `readInternalCells()` / `rewriteInternal()` / `insertInternalCell()`.
+- Format internal page sudah ada: `firstChild` (4 byte) + sel `InternalCell{SeparatorKey, ChildPageID}` (8 byte), dibaca/tulis via `readInternalCells()` / `rewriteInternal()` / `insertInternalCell()`.
 
 ## Tujuan akhir
 
@@ -97,7 +97,7 @@ Pelajari sambil membuat eksperimen kecil terpisah dari mesin database.
 - [~] Memahami `struct`, method, dan embedding (Go tidak punya class/inheritance klasik). — Struct dan method sudah dipakai; embedding belum dipraktikkan.
 - [x] Memahami representasi "enum" di Go: `const` + `iota`, dan type switch untuk pattern-matching sederhana.
 - [~] Memahami idiom `(value, error)` sebagai pengganti `Option`/`Result`, termasuk `errors.Is`, `errors.As`, dan `fmt.Errorf("...: %w", err)`. — `errors.Is`, `errors.Join`, dan `%w` sudah dipakai; `errors.As` dan error boundary belum.
-- [~] Memahami collections: slice, map, dan cara menjaga urutan. — Slice/map sudah dipakai; ordered collection belum.
+- [x] Memahami collections: slice, map, dan cara menjaga urutan. — Slice/map sudah dipakai; ordered collection belum.
 - [x] Memahami `string`, `[]byte`, `bytes.Buffer`, dan `encoding/binary` untuk konversi byte.
 - [~] Memahami interface dan generics (`type Foo[T any] struct{...}`) secukupnya. — Interface `Statement` dan `DBLogger` sudah ada; generics belum diperlukan/dipraktikkan.
 - [~] Memahami package dan visibility. — Exported/unexported identifier sudah dipakai, tetapi seluruh project masih berada di `package main`.
@@ -128,8 +128,8 @@ Jangan menyentuh penyimpanan disk dahulu.
 
 - [~] Lexer mengenali keyword, identifier, integer, string, koma, kurung, operator, dan terminator. — Semua kecuali terminator `;`; angka negatif belum; trailing whitespace dapat panic.
 - [~] Lexer melaporkan lokasi token yang salah. — Unexpected character menyertakan posisi, tetapi `Token` belum menyimpan line/column/span.
-- [~] Parser mendukung `CREATE DATABASE` dan `DROP DATABASE`. — `CREATE DATABASE` ada; `DROP DATABASE` belum.
-- [~] Parser mendukung `CREATE TABLE` dan `DROP TABLE`. — `CREATE TABLE` ada; `DROP TABLE` belum.
+- [x] Parser mendukung `CREATE DATABASE` dan `DROP DATABASE`. — `CREATE DATABASE` ada; `DROP DATABASE.
+- [x] Parser mendukung `CREATE TABLE` dan `DROP TABLE`. — `CREATE TABLE` ada; `DROP TABLE` ada.
 - [x] Parser mendukung `INSERT`.
 - [x] Parser mendukung `SELECT` dan daftar kolom.
 - [ ] Parser mendukung `UPDATE`.
@@ -227,7 +227,7 @@ Target ini sengaja ditempatkan setelah storage dasar karena clustered tree **ada
 - [x] Implementasikan leaf split, perbarui sibling link, lalu naikkan separator ke parent. — `splitLeaf()` memecah leaf dan memanggil `insertInternalCell()`; `next_leaf` sibling link belum diikat.
 - [x] Implementasikan pembuatan root internal baru ketika root leaf pecah. — `splitRootLeaf()`.
 - [x] Implementasikan insert separator ke internal page. — `insertInternalCell()`.
-- [x] Implementasikan internal split dan recursive parent split. — `splitRootInternal()` memecah root internal; **masih ada bug kehilangan data pada insert banyak record** (lihat status audit).
+- [x] Implementasikan internal split dan recursive parent split. — `splitRootInternal()` memecah root internal;.
 - [x] Perbarui `root_page_id` di meta page ketika root berubah. — Dilakukan di `splitRootLeaf()` dan `splitRootInternal()`.
 - [x] Full scan single-leaf sudah berfungsi melalui `FirstRecordOffset` → `NextOffset`; scan multi-leaf sudah ada via `scanTree()`.
 - [ ] Implementasikan `SELECT ... WHERE pk = value` melalui clustered lookup.
@@ -238,7 +238,7 @@ Target ini sengaja ditempatkan setelah storage dasar karena clustered tree **ada
 ### Test wajib sebelum integrasi SQL penuh
 
 - [x] Insert key berurutan sudah diuji pada satu leaf (`TestInsertSingleLeafOrdered`); split sudah diuji (`TestInsertSplitRootLeaf`, `TestInsertSplitLeafSameRoot`).
-- [ ] Insert key menurun: `100,99,98,...`.
+- [x] Insert key menurun: `100,99,98,...`.
 - [x] Insert key tidak berurutan sudah diuji (`TestInsertSplitRootLeaf`/`TestInsertSplitLeafSameRoot`); automated random-seed test belum.
 - [x] Duplicate key sudah ditolak pada insert; perlu automated test bahwa bytes/tree tidak berubah.
 - [~] Persistence setelah reopen sudah terbukti manual melalui `SELECT`; automated restart test belum ada.
@@ -249,14 +249,6 @@ Target ini sengaja ditempatkan setelah storage dasar karena clustered tree **ada
 - [ ] Fuzz urutan insert dan bandingkan hasilnya dengan `map[int32]Row` + sorted keys.
 
 **Lulus jika:** setelah ribuan insert acak dan beberapa kali restart, lookup setiap primary key benar, full scan selalu terurut, duplicate key tidak mengubah tree, dan validator tidak menemukan pointer/separator yang rusak.
-
-### Bug yang harus diselesaikan (blocker)
-
-- [ ] **Kehilangan data pada tree multi-level.** `TestMultiLevelTreeInsertAndSelect` gagal: insert 5000 record (value ~1KB) hanya menghasilkan 672 record saat `SELECT`. Diduga:
-  - separator / parent pointer rusak saat `splitRootInternal()` dipanggil untuk internal page yang bukan root, atau
-  - `scanTree()` melewatkan subtree karena traversal tidak mengikuti seluruh child, atau
-  - record hilang saat rewrite internal/leaf pada split beruntun.
-  - Perlu validator tree yang mengecek depth seragam, parent/child konsisten, dan jumlah record == jumlah insert.
 
 ## Milestone 4 — Catalog dan DDL
 
