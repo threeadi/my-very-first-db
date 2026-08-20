@@ -87,6 +87,41 @@ func (x *Executor) CreateDatabase(stmt CreateDatabaseStatement) error {
 
 }
 
+func (x *Executor) DropDatabase(stmt DropDatabaseStatement) error {
+	if !x.catalog.DatabaseExists(stmt.DBName) {
+		return ErrDatabaseNotFound
+	}
+	filePath := filepath.Join(x.config.DataDirectory, stmt.DBName)
+
+	err := os.RemoveAll(filePath)
+	if err != nil {
+		return errors.Join(ErrDatabaseExists, err)
+	}
+
+	delete(x.catalog.Databases, stmt.DBName)
+	return x.catalog.Save(x.config.CatalogPath)
+}
+
+func (x *Executor) DropTable(stmt DropTableStatement) error {
+	if !x.catalog.TableExists(stmt.DBName, stmt.Table) {
+		return ErrTableNotFound
+	}
+
+	filePath := filepath.Join(x.config.DataDirectory, stmt.DBName, stmt.Table+".3tbl")
+
+	err := os.Remove(filePath)
+	if err != nil {
+		fmt.Println("test  3")
+		return err
+	}
+
+	db := x.catalog.Databases[stmt.DBName]
+	delete(db.Tables, stmt.Table)
+	x.catalog.Databases[stmt.DBName] = db
+
+	return x.catalog.Save(x.config.CatalogPath)
+}
+
 func (x *Executor) CreateTable(stmt CreateTableStatement) error {
 	// 1. Executor TANYA ke catalog: "apa database ini udah ada?"
 	if !x.catalog.DatabaseExists(stmt.DBName) {

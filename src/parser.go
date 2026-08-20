@@ -44,6 +44,19 @@ type CreateDatabaseStatement struct {
 
 func (CreateDatabaseStatement) statementNode() {}
 
+type DropDatabaseStatement struct {
+	DBName string
+}
+
+func (DropDatabaseStatement) statementNode() {}
+
+type DropTableStatement struct {
+	DBName string
+	Table  string
+}
+
+func (DropTableStatement) statementNode() {}
+
 type CreateTableStatement struct {
 	DBName  string
 	Table   string
@@ -98,6 +111,15 @@ func (p *Parser) Parse() (Statement, error) {
 	}
 
 	switch p.Tokens[0].Literal {
+	case "drop":
+		switch p.Tokens[1].Literal {
+		case "database":
+			return p.parseDropDB()
+		case "table":
+			return p.parseDropTable()
+		default:
+			return nil, fmt.Errorf("%w: DROP %s", ErrInvalidStatement, p.Tokens[1].Literal)
+		}
 	case "create":
 		if len(p.Tokens) < 2 {
 			return nil, ErrUnexpectedEOF
@@ -431,4 +453,48 @@ func (p *Parser) parseInsert() (Statement, error) {
 		Columns: columns,
 		Values:  values,
 	}, nil
+}
+
+func (p *Parser) parseDropDB() (Statement, error) {
+	p.pos += 2
+	if p.pos >= len(p.Tokens) {
+		return nil, fmt.Errorf("%w: diharapkan nama database", ErrUnexpectedEOF)
+	}
+	var dbName strings.Builder
+	for p.pos < len(p.Tokens) {
+		token := p.Tokens[p.pos]
+		if token.Type != IDENT && token.Type != STRING && token.Type != NUMBER {
+			return nil, fmt.Errorf("%w: nama database tidak valid: %s", ErrInvalidStatement, token.Literal)
+		}
+
+		if _, err := dbName.WriteString(token.Literal); err != nil {
+			return nil, errors.Join(ErrInvalidStatement, err)
+		}
+		p.pos++
+	}
+
+	return DropDatabaseStatement{DBName: dbName.String()}, nil
+}
+
+func (p *Parser) parseDropTable() (Statement, error) {
+	p.pos += 2
+	if p.pos >= len(p.Tokens) {
+		return nil, fmt.Errorf("%w: diharapkan nama table", ErrUnexpectedEOF)
+	}
+
+	var table strings.Builder
+	for p.pos < len(p.Tokens) {
+		token := p.Tokens[p.pos]
+		if token.Type != IDENT && token.Type != STRING && token.Type != NUMBER {
+			return nil, fmt.Errorf("%w: nama database tidak valid: %s", ErrInvalidStatement, token.Literal)
+		}
+
+		if _, err := table.WriteString(token.Literal); err != nil {
+			return nil, errors.Join(ErrInvalidStatement, err)
+		}
+		p.pos++
+	}
+
+	return DropTableStatement{DBName: currentDatabase, Table: table.String()}, nil
+
 }

@@ -85,6 +85,18 @@ func main() {
 		}
 
 		switch stmt := statement.(type) {
+		case DropDatabaseStatement:
+			err = executor.DropDatabase(stmt)
+			if err != nil {
+				log.Default().Println("error drop database:", err)
+				continue
+			}
+		case DropTableStatement:
+			err = executor.DropTable(stmt)
+			if err != nil {
+				log.Default().Println("error drop table:", err)
+				continue
+			}
 		case CreateDatabaseStatement:
 			err = executor.CreateDatabase(stmt)
 			if err != nil {

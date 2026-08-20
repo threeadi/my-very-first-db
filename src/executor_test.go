@@ -58,7 +58,6 @@ func TestCreateEmptyTree(t *testing.T) {
 	assert.Equal(t, head.Level, uint16(0))
 	assert.Equal(t, head.FirstRecordOffset, uint16(0))           // means this record is latest
 	assert.Equal(t, head.FreeStart, uint16(IndexPageHeaderSize)) // means record start at 17
-
 }
 
 func createEmptyTree(path string) error {
