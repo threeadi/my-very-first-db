@@ -536,7 +536,6 @@ func insertInternalCell(page *Page, separatorKey int32, childPageID PageID) erro
 		return err
 	}
 
-
 	for _, cell := range cells {
 		if cell.SeparatorKey == separatorKey {
 			return fmt.Errorf("duplicate internal separator: %d", separatorKey)
@@ -828,41 +827,5 @@ func updateChildrenParentID(
 		}
 	}
 
-	return nil
-}
-
-func validateChildrenParentID(
-	pager *Pager,
-	parentID PageID,
-	firstChild PageID,
-	cells []InternalCell,
-) error {
-	childIDs := []PageID{firstChild}
-	for _, cell := range cells {
-		childIDs = append(childIDs, cell.ChildPageID)
-	}
-
-	for _, childID := range childIDs {
-		child, err := pager.ReadPage(childID)
-		if err != nil {
-			return err
-		}
-
-		header, err := DecodeIndexPageHeader(child)
-		if err != nil {
-			return err
-		}
-
-		if header.ParentID != parentID {
-			return fmt.Errorf(
-				"Salah parentID: child=%d expected=%d actual=%d type=%d",
-				childID,
-				parentID,
-				header.ParentID,
-				header.PageType,
-			)
-		}
-
-	}
 	return nil
 }
