@@ -98,6 +98,7 @@ func (p *Pager) WritePage(page *Page) error {
 	if uint16(n) != PageSize {
 		return ErrPageWriteFailed
 	}
+
 	return nil
 }
 

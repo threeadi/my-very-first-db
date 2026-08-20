@@ -25,5 +25,6 @@ var (
 
 	ErrCorruptTableFile = errors.New("corrupt table file")
 	ErrPageWriteFailed  = errors.New("failed to write page")
+	ErrInternalPageFull = errors.New("internal page is full")
 	ErrPageReadFailed   = errors.New("failed to read page")
 )

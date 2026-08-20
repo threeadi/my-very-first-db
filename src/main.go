@@ -33,6 +33,7 @@ func main() {
 	panicIf(err)
 
 	executor := NewExecutor(config, catalog)
+	defer executor.Close()
 	scanner := bufio.NewScanner(os.Stdin)
 
 	for {

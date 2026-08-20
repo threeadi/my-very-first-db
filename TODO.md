@@ -22,8 +22,8 @@ Legenda:
 - `INSERT` pada satu leaf sudah menjaga **urutan logis PRIMARY KEY** walaupun posisi fisik record append ke `FreeStart`.
 - Insert depan, tengah, dan belakang menggunakan pasangan `prevOffset` / `currentOffset`; predecessor di-patch agar menunjuk ke record baru.
 - Duplicate primary key sudah ditolak dan constraint `NOT NULL` sudah tervalidasi saat insert.
-- Tree saat ini masih **single-leaf**. Belum ada leaf split, internal page aktif, root split, atau traversal multi-level.
-- Target berikutnya: kuatkan test single-leaf, lalu implementasikan **leaf split → internal root → traversal root ke leaf**.
+- **B+ tree multi-level sudah diimplementasikan**: `targetPage()` (traversal root → internal → leaf), `scanTree()` (full scan rekursif leaf+internal), `splitLeaf()` (split leaf non-root + insert separator ke parent), `splitRootLeaf()` (split root leaf → buat root internal baru), dan `splitRootInternal()` (split root internal saat penuh).
+- Format internal page sudah ada: `firstChild` (4 byte) + sel ``InternalCell{SeparatorKey, ChildPageID}`` (8 byte), dibaca/tulis via `readInternalCells()` / `rewriteInternal()` / `insertInternalCell()`.
 
 ## Tujuan akhir
 
@@ -174,9 +174,9 @@ Target ini sengaja ditempatkan setelah storage dasar karena clustered tree **ada
 - [x] Jika tabel tidak mendefinisikan primary key, tolak `CREATE TABLE` terlebih dahulu.
 - [x] Identitas logis row adalah primary key, bukan offset fisik record.
 - [ ] Secondary index nantinya menyimpan `(secondary_key, primary_key)`, lalu lookup dilanjutkan ke clustered tree.
-- [~] Leaf sudah menyimpan full row; format internal node belum diimplementasikan.
-- [ ] Semua leaf berada pada depth yang sama dan terhubung dengan `next_leaf` untuk sequential/range scan.
-- [ ] Gunakan invariant separator: setiap separator adalah key terkecil pada child di sebelah kanan.
+- [x] Leaf sudah menyimpan full row; format internal node sudah diimplementasikan (`InternalCell`, `readInternalCells`, `rewriteInternal`).
+- [ ] Semua leaf berada pada depth yang sama dan terhubung dengan `next_leaf` untuk sequential/range scan. — `next_leaf` belum ada; full scan saat ini pakai traversal rekursif dari root, bukan ikatan leaf.
+- [x] Gunakan invariant separator: setiap separator adalah key terkecil pada child di sebelah kanan. — Ditegakkan di `targetPage()` dan `splitLeaf()`/`splitRootInternal()`.
 - [ ] Tidak perlu merge/rebalance saat delete pada versi pertama; tandai deleted atau compact satu leaf, tetapi tree harus tetap searchable.
 
 ### Blocker / hardening sebelum split
@@ -221,15 +221,15 @@ Target ini sengaja ditempatkan setelah storage dasar karena clustered tree **ada
 
 - [x] Buat tabel baru dengan root berupa satu leaf page kosong.
 - [ ] Optimalkan pencarian key di leaf. — Saat ini pencarian posisi insert masih linear melalui `NextOffset`; binary search belum relevan sampai ada struktur offset/index tambahan.
-- [ ] Implementasikan traversal root → internal → leaf untuk `Find(pk)` setelah internal page tersedia.
+- [x] Implementasikan traversal root → internal → leaf untuk `Find(pk)` setelah internal page tersedia. — `targetPage()` sudah rekursif.
 - [x] Implementasikan insert terurut ke leaf selama page masih cukup.
 - [x] Tolak duplicate primary key sebelum perubahan dipublikasikan.
-- [ ] Implementasikan leaf split, perbarui sibling link, lalu naikkan separator ke parent.
-- [ ] Implementasikan pembuatan root internal baru ketika root leaf pecah.
-- [ ] Implementasikan insert separator ke internal page.
-- [ ] Implementasikan internal split dan recursive parent split.
-- [ ] Perbarui `root_page_id` di meta page ketika root berubah.
-- [~] Full scan single-leaf sudah berfungsi melalui `FirstRecordOffset` → `NextOffset`; scan multi-leaf belum ada.
+- [x] Implementasikan leaf split, perbarui sibling link, lalu naikkan separator ke parent. — `splitLeaf()` memecah leaf dan memanggil `insertInternalCell()`; `next_leaf` sibling link belum diikat.
+- [x] Implementasikan pembuatan root internal baru ketika root leaf pecah. — `splitRootLeaf()`.
+- [x] Implementasikan insert separator ke internal page. — `insertInternalCell()`.
+- [x] Implementasikan internal split dan recursive parent split. — `splitRootInternal()` memecah root internal; **masih ada bug kehilangan data pada insert banyak record** (lihat status audit).
+- [x] Perbarui `root_page_id` di meta page ketika root berubah. — Dilakukan di `splitRootLeaf()` dan `splitRootInternal()`.
+- [x] Full scan single-leaf sudah berfungsi melalui `FirstRecordOffset` → `NextOffset`; scan multi-leaf sudah ada via `scanTree()`.
 - [ ] Implementasikan `SELECT ... WHERE pk = value` melalui clustered lookup.
 - [ ] Implementasikan `UPDATE` non-PK; bila ukuran row tidak lagi muat, lakukan delete + reinsert.
 - [ ] Implementasikan perubahan PK sebagai delete old key + insert new key.
@@ -237,18 +237,26 @@ Target ini sengaja ditempatkan setelah storage dasar karena clustered tree **ada
 
 ### Test wajib sebelum integrasi SQL penuh
 
-- [~] Insert key berurutan sudah diuji manual pada satu leaf; belum sampai split.
+- [x] Insert key berurutan sudah diuji pada satu leaf (`TestInsertSingleLeafOrdered`); split sudah diuji (`TestInsertSplitRootLeaf`, `TestInsertSplitLeafSameRoot`).
 - [ ] Insert key menurun: `100,99,98,...`.
-- [~] Insert key tidak berurutan sudah diuji manual (contoh `1,2,5,3`) dan SELECT tetap terurut; automated random-seed test belum.
-- [~] Duplicate key sudah ditolak pada insert; perlu automated test bahwa bytes/tree tidak berubah.
-- [~] Persistence setelah reopen sudah terbukti manual melalui `SELECT`; lookup per-PK belum ada.
+- [x] Insert key tidak berurutan sudah diuji (`TestInsertSplitRootLeaf`/`TestInsertSplitLeafSameRoot`); automated random-seed test belum.
+- [x] Duplicate key sudah ditolak pada insert; perlu automated test bahwa bytes/tree tidak berubah.
+- [~] Persistence setelah reopen sudah terbukti manual melalui `SELECT`; automated restart test belum ada.
 - [x] Full scan pada single-leaf menghasilkan primary key terurut melalui chain `NextOffset`.
-- [ ] Semua leaf memiliki depth yang sama.
+- [ ] Semua leaf memiliki depth yang sama. — Belum divalidasi; inilah yang dicurigai menyebabkan bug kehilangan data (`TestMultiLevelTreeInsertAndSelect` gagal: 5000 → 672).
 - [ ] Parent pointer, child pointer, separator, dan sibling link valid setelah setiap split.
-- [ ] Root split lebih dari sekali.
+- [x] Root split lebih dari sekali sudah diuji (`TestSplitRootInternal` dengan 2045 insert → level 2).
 - [ ] Fuzz urutan insert dan bandingkan hasilnya dengan `map[int32]Row` + sorted keys.
 
 **Lulus jika:** setelah ribuan insert acak dan beberapa kali restart, lookup setiap primary key benar, full scan selalu terurut, duplicate key tidak mengubah tree, dan validator tidak menemukan pointer/separator yang rusak.
+
+### Bug yang harus diselesaikan (blocker)
+
+- [ ] **Kehilangan data pada tree multi-level.** `TestMultiLevelTreeInsertAndSelect` gagal: insert 5000 record (value ~1KB) hanya menghasilkan 672 record saat `SELECT`. Diduga:
+  - separator / parent pointer rusak saat `splitRootInternal()` dipanggil untuk internal page yang bukan root, atau
+  - `scanTree()` melewatkan subtree karena traversal tidak mengikuti seluruh child, atau
+  - record hilang saat rewrite internal/leaf pada split beruntun.
+  - Perlu validator tree yang mengecek depth seragam, parent/child konsisten, dan jumlah record == jumlah insert.
 
 ## Milestone 4 — Catalog dan DDL
 

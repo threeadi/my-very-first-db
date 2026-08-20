@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -108,13 +110,16 @@ func createEmptyTree(path string) error {
 
 func TestInsertSingleLeafOrdered(t *testing.T) {
 	tempDir := t.TempDir()
-	defer os.RemoveAll(tempDir)
 	config := &Config{
 		DataDirectory: tempDir + string(os.PathSeparator),
 		CatalogPath:   filepath.Join(tempDir, "catalog.json"),
 	}
 	catalog := NewCatalog()
 	executor := NewExecutor(config, catalog)
+	defer func() {
+		executor.Close()
+		os.RemoveAll(tempDir)
+	}()
 	err := executor.CreateDatabase(CreateDatabaseStatement{
 		DBName: "testdb",
 	})
@@ -262,7 +267,7 @@ func TestInsertSplitRootLeaf(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	largeValue := strings.Repeat("a", 1000)
+	largeValue := createLargeString()
 	// 4 record masih muat.
 	// Record ke-5 akan membuat root leaf split.
 	ids := []string{
@@ -294,6 +299,7 @@ func TestInsertSplitRootLeaf(t *testing.T) {
 	}
 	defer func() {
 		pager.Close()
+		executor.Close()
 		os.RemoveAll(path)
 	}()
 
@@ -458,7 +464,7 @@ func TestInsertSplitLeafSameRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	largeValue := strings.Repeat("a", 1000)
+	largeValue := createLargeString()
 
 	// 9 record dalam 4 page berbeda
 	ids := []string{
@@ -495,6 +501,7 @@ func TestInsertSplitLeafSameRoot(t *testing.T) {
 
 	defer func() {
 		pager.Close()
+		executor.Close()
 		os.RemoveAll(path)
 	}()
 
@@ -560,4 +567,215 @@ func TestInsertSplitLeafSameRoot(t *testing.T) {
 	}
 
 	assert.Equal(t, len(res.Records), len(ids))
+}
+
+func TestSplitRootInternal(t *testing.T) {
+	tempDir := t.TempDir()
+
+	config := &Config{
+		DataDirectory: tempDir + string(os.PathSeparator),
+		CatalogPath: filepath.Join(
+			tempDir,
+			"catalog.json",
+		),
+	}
+
+	catalog := NewCatalog()
+	executor := NewExecutor(config, catalog)
+
+	err := executor.CreateDatabase(
+		CreateDatabaseStatement{
+			DBName: "testdb",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = executor.CreateTable(
+		CreateTableStatement{
+			DBName: "testdb",
+			Table:  "users",
+			Columns: []ColumnDef{
+				{
+					Name:      "id",
+					ValueType: IntType,
+					Primary:   true,
+				},
+				{
+					Name:      "name",
+					ValueType: VarcharType,
+				},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	largeValue := createLargeString()
+
+	// 2045 supaya root overflow
+	for i := 1; i <= 2045; i++ {
+		err := executor.Insert(
+			InsertStatement{
+				DBName: "testdb",
+				Table:  "users",
+				Values: []string{
+					strconv.Itoa(i),
+					largeValue,
+				},
+			},
+		)
+
+		if err != nil {
+			t.Fatalf("insert %d failed: %v", i, err)
+		}
+	}
+
+	path := filepath.Join(
+		config.DataDirectory,
+		"testdb",
+		"users.3tbl",
+	)
+
+	pager, err := OpenPager(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() {
+		pager.Close()
+		executor.Close()
+		os.RemoveAll(path)
+	}()
+
+	metaPage, err := pager.ReadPage(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	meta, err := DecodeMetaPage(metaPage)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rootPage, err := pager.ReadPage(meta.RootPageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rootHeader, err := DecodeIndexPageHeader(rootPage)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assert.Equal(t, PageTypeInternal, rootHeader.PageType)
+
+	assert.Equal(t, uint16(2), rootHeader.Level)
+}
+
+func TestMultiLevelTreeInsertAndSelect(t *testing.T) {
+	tempDir := t.TempDir()
+	fmt.Println("tempDir: ", tempDir)
+
+	config := &Config{
+		DataDirectory: tempDir + string(os.PathSeparator),
+		CatalogPath: filepath.Join(
+			tempDir,
+			"catalog.json",
+		),
+	}
+
+	catalog := NewCatalog()
+	executor := NewExecutor(config, catalog)
+	defer func() {
+		executor.Close()
+		os.RemoveAll(tempDir)
+	}()
+
+	err := executor.CreateDatabase(
+		CreateDatabaseStatement{
+			DBName: "testdb",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = executor.CreateTable(
+		CreateTableStatement{
+			DBName: "testdb",
+			Table:  "users",
+			Columns: []ColumnDef{
+				{
+					Name:      "id",
+					ValueType: IntType,
+					Primary:   true,
+				},
+				{
+					Name:      "name",
+					ValueType: VarcharType,
+				},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	largeValue := createLargeString()
+
+	for i := 1; i <= 10000; i++ {
+		err := executor.Insert(
+			InsertStatement{
+				DBName: "testdb",
+				Table:  "users",
+				Values: []string{
+					strconv.Itoa(i),
+					largeValue,
+				},
+			},
+		)
+
+		if err != nil {
+			t.Fatalf("insert %d failed: %v", i, err)
+		}
+	}
+
+	res, err := executor.Select(SelectStatement{
+		DBName:  "testdb",
+		Table:   "users",
+		Columns: []string{"*"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found := make(map[int32]bool, len(res.Records))
+	for _, rec := range res.Records {
+		pk, _ := rec[0].Value.(int32)
+		found[pk] = true
+	}
+
+	recordsTotal := 10_000
+	var missing []int32
+	for i := int32(1); i <= int32(recordsTotal); i++ {
+		if !found[i] {
+			missing = append(missing, i)
+		}
+	}
+
+	fmt.Println("total missing:", len(missing))
+	if len(missing) > 0 {
+		fmt.Println("first missing:", missing[0], "last missing:", missing[len(missing)-1])
+		// cetak beberapa gap biar kelihatan pola: berurutan / tersebar
+		fmt.Println("sample:", missing[:min(20, len(missing))])
+	}
+
+	assert.Equal(t, recordsTotal, len(res.Records))
+}
+
+func createLargeString() string {
+	return strings.Repeat("a", 1000)
 }
