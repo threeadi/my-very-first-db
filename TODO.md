@@ -212,7 +212,7 @@ Target ini sengaja ditempatkan setelah storage dasar karena clustered tree **ada
 - [x] Record leaf dihubungkan secara logis dengan `NextOffset`; `NextOffset = 0` berarti tail/end.
 - [x] Record baru ditulis secara fisik pada `FreeStart`; urutan fisik tidak harus sama dengan urutan primary key.
 - [x] Versi sekarang sengaja tidak memakai slot directory dan tidak memakai INFIMUM/SUPREMUM.
-- [ ] Tentukan format internal page sederhana: separator key + child page ID.
+- [x] Tentukan format internal page sederhana: separator key + child page ID.
 - [x] Implementasikan `ReadPage(pageID)` dan `WritePage(page)` menggunakan offset `int64(pageID) * PageSize`.
 - [~] Implementasikan allocator page monotonik; tambahkan test multi-allocation dan persist `NextPageID` bila allocator mulai bergantung pada meta.
 - [ ] Tentukan mekanisme scan antar-leaf setelah split sebelum full table scan multi-page.
@@ -241,9 +241,9 @@ Target ini sengaja ditempatkan setelah storage dasar karena clustered tree **ada
 - [x] Insert key menurun: `100,99,98,...`.
 - [x] Insert key tidak berurutan sudah diuji (`TestInsertSplitRootLeaf`/`TestInsertSplitLeafSameRoot`); automated random-seed test belum.
 - [x] Duplicate key sudah ditolak pada insert; perlu automated test bahwa bytes/tree tidak berubah.
-- [~] Persistence setelah reopen sudah terbukti manual melalui `SELECT`; automated restart test belum ada.
+- [x] Persistence setelah reopen sudah terbukti manual melalui `SELECT`; automated restart test belum ada.
 - [x] Full scan pada single-leaf menghasilkan primary key terurut melalui chain `NextOffset`.
-- [ ] Semua leaf memiliki depth yang sama. — Belum divalidasi; inilah yang dicurigai menyebabkan bug kehilangan data (`TestMultiLevelTreeInsertAndSelect` gagal: 5000 → 672).
+- [x] Semua leaf memiliki depth yang sama.; 
 - [ ] Parent pointer, child pointer, separator, dan sibling link valid setelah setiap split.
 - [x] Root split lebih dari sekali sudah diuji (`TestSplitRootInternal` dengan 2045 insert → level 2).
 - [ ] Fuzz urutan insert dan bandingkan hasilnya dengan `map[int32]Row` + sorted keys.
@@ -487,9 +487,6 @@ Untuk setiap item:
 - Posisi fisik record di page boleh berbeda dari urutan logis primary key.
 
 ## Setelah versi pertama selesai
-
-Jangan mulai bagian ini sebelum seluruh demo akhir lulus.
-
 - [ ] Buffer pool dan page replacement.
 - [ ] Optimasi lanjutan B+ tree: merge/rebalance delete, bulk loading, prefix compression, dan page compaction.
 - [ ] Free-page list dan vacuum/compaction.

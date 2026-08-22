@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -64,24 +63,27 @@ func (x *Executor) CreateDatabase(stmt CreateDatabaseStatement) error {
 		return fmt.Errorf("%w: %s", ErrDatabaseExists, stmt.DBName)
 	}
 
-	_, err := os.Stat(x.config.DataDirectory)
-	if err != nil {
-		err = os.Mkdir("data", 0755)
-		if err != nil {
-			log.Fatalf("error %v", err)
-		}
-	}
-
-	_, err = os.Stat(x.config.DataDirectory + stmt.DBName)
-	if err == nil {
-		return fmt.Errorf("%w : %s ", ErrDatabaseExists, stmt.DBName)
-	}
-
-	err = os.Mkdir(x.config.DataDirectory+stmt.DBName, 0755)
-	if err != nil {
+	if err := os.MkdirAll(x.config.DataDirectory, 0755); err != nil {
 		return err
 	}
-	// 3. Executor MINTA catalog buat mencatat
+
+	dbPath := filepath.Join(
+		x.config.DataDirectory,
+		stmt.DBName,
+	)
+
+	if err := os.Mkdir(dbPath, 0755); err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf(
+				"%w: %s",
+				ErrDatabaseExists,
+				stmt.DBName,
+			)
+		}
+
+		return err
+	}
+
 	x.catalog.RegisterDatabase(stmt.DBName)
 	return x.catalog.Save(x.config.CatalogPath)
 
@@ -1027,12 +1029,13 @@ func (x *Executor) targetPage(pager *Pager, parent *Page, newPK int32) (*Page, e
 }
 
 func (x *Executor) Close() error {
-	for _, pager := range x.pagers {
-		err := pager.Close()
-		if err != nil {
+	for k, pager := range x.pagers {
+		if err := pager.Close(); err != nil {
 			fmt.Println("failed to close pager", err)
 			return err
 		}
+
+		delete(x.pagers, k)
 	}
 	return nil
 }

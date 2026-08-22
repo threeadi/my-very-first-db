@@ -792,8 +792,329 @@ func TestMultiLevelTreeInsertAndSelect(t *testing.T) {
 	}
 
 	assert.Equal(t, recordsTotal, len(res.Records))
+	cols, err := catalog.GetTableColumns("testdb", "users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pager, err := OpenPager(filepath.Join(config.DataDirectory, "testdb", "users.3tbl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pager.Close()
+
+	if err = ValidateTree(pager, cols, 0); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println("the tree is valid")
+}
+
+func TestRestartInsertAndSelect(t *testing.T) {
+	tempDir := t.TempDir()
+	fmt.Println("tempDir: ", tempDir)
+	if err := os.RemoveAll(tempDir); err != nil {
+		t.Fatal(err)
+	}
+
+	config := &Config{
+		DataDirectory: tempDir + string(os.PathSeparator),
+		CatalogPath: filepath.Join(
+			tempDir,
+			"catalog.json",
+		),
+	}
+
+	catalog, err := LoadCatalog(config.CatalogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	executor := NewExecutor(config, catalog)
+	err = executor.CreateDatabase(
+		CreateDatabaseStatement{
+			DBName: "testdb",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = executor.CreateTable(
+		CreateTableStatement{
+			DBName: "testdb",
+			Table:  "users",
+			Columns: []ColumnDef{
+				{
+					Name:      "id",
+					ValueType: IntType,
+					Primary:   true,
+				},
+				{
+					Name:      "name",
+					ValueType: VarcharType,
+				},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	largeValue := createLargeString()
+
+	recordsTotal := 1_000
+	for i := 1; i <= recordsTotal; i++ {
+		err := executor.Insert(
+			InsertStatement{
+				DBName: "testdb",
+				Table:  "users",
+				Values: []string{
+					strconv.Itoa(i),
+					largeValue,
+				},
+			},
+		)
+
+		if err != nil {
+			t.Fatalf("insert %d failed: %v", i, err)
+		}
+	}
+
+	err = executor.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog2, err := LoadCatalog(config.CatalogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// build new one
+	exec2 := NewExecutor(config, catalog2)
+	defer exec2.Close()
+
+	res, err := exec2.Select(SelectStatement{
+		DBName:  "testdb",
+		Table:   "users",
+		Columns: []string{"*"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found := make(map[int32]bool, len(res.Records))
+	for _, rec := range res.Records {
+		pk, _ := rec[0].Value.(int32)
+		found[pk] = true
+	}
+
+	assert.Equal(t, recordsTotal, len(res.Records))
+
+	assert.Equal(t, recordsTotal, len(res.Records))
+	cols, err := catalog.GetTableColumns("testdb", "users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pager, err := OpenPager(filepath.Join(config.DataDirectory, "testdb", "users.3tbl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pager.Close()
+
+	if err = ValidateTree(pager, cols, 0); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println("the tree is valid")
 }
 
 func createLargeString() string {
 	return strings.Repeat("a", 1000)
+}
+
+func ValidateTree(pager *Pager, columns []ColumnDef, pkColumn int) error {
+	metaRaw, err := pager.ReadPage(PageID(0))
+	if err != nil {
+		return err
+	}
+
+	meta, err := DecodeMetaPage(metaRaw)
+	if err != nil {
+		return err
+	}
+
+	rootPage, err := pager.ReadPage(meta.RootPageID)
+	if err != nil {
+		return err
+	}
+
+	root, err := DecodeIndexPageHeader(rootPage)
+	if err != nil {
+		return err
+	}
+
+	if root.ParentID != InvalidPageID {
+		return fmt.Errorf("root page %d has parent %d",
+			root.PageID,
+			root.ParentID,
+		)
+	}
+
+	visited := make(map[PageID]bool)
+	var leafLevels []uint16
+
+	return validateNode(
+		pager,
+		meta.RootPageID,
+		InvalidPageID,
+		columns,
+		pkColumn,
+		visited,
+		&leafLevels,
+	)
+}
+
+func validateNode(
+	pager *Pager,
+	pageID PageID,
+	expectedParent PageID,
+	columns []ColumnDef,
+	pkColumn int,
+	visited map[PageID]bool,
+	leafLevels *[]uint16,
+) error {
+
+	if visited[pageID] {
+		return fmt.Errorf("cycle detected at page %d", pageID)
+	}
+
+	visited[pageID] = true
+
+	page, err := pager.ReadPage(pageID)
+	if err != nil {
+		return err
+	}
+
+	header, err := DecodeIndexPageHeader(page)
+	if err != nil {
+		return err
+	}
+
+	if header.ParentID != expectedParent {
+		return fmt.Errorf(
+			"page %d parent mismatch. expected=%d got=%d",
+			pageID,
+			expectedParent,
+			header.ParentID,
+		)
+	}
+
+	switch header.PageType {
+	case PageTypeLeaf:
+		records, err := readLeafRecords(
+			page,
+			columns,
+			pkColumn,
+		)
+		if err != nil {
+			return err
+		}
+
+		if len(records) != int(header.RecordCount) {
+			return fmt.Errorf(
+				"leaf %d record count mismatch. header=%d actual=%d",
+				pageID,
+				header.RecordCount,
+				len(records),
+			)
+		}
+
+		for i := 1; i < len(records); i++ {
+			if records[i-1].PK >= records[i].PK {
+				return fmt.Errorf(
+					"leaf %d not sorted. %d >= %d",
+					pageID,
+					records[i-1].PK,
+					records[i].PK,
+				)
+			}
+		}
+
+		*leafLevels = append(*leafLevels, header.Level)
+
+		if len(*leafLevels) > 1 {
+			first := (*leafLevels)[0]
+
+			for _, lvl := range *leafLevels {
+				if lvl != first {
+					return fmt.Errorf(
+						"leaf levels mismatch. expected=%d got=%d",
+						first,
+						lvl,
+					)
+				}
+			}
+		}
+
+		return nil
+
+	case PageTypeInternal:
+		firstChild, cells, err := readInternalCells(page)
+		if err != nil {
+			return err
+		}
+
+		if len(cells) != int(header.RecordCount) {
+			return fmt.Errorf(
+				"internal %d cell count mismatch. header=%d actual=%d",
+				pageID,
+				header.RecordCount,
+				len(cells),
+			)
+		}
+
+		for i := 1; i < len(cells); i++ {
+			if cells[i-1].SeparatorKey >= cells[i].SeparatorKey {
+				return fmt.Errorf(
+					"internal %d separators not ascending",
+					pageID,
+				)
+			}
+		}
+
+		err = validateNode(
+			pager,
+			firstChild,
+			pageID,
+			columns,
+			pkColumn,
+			visited,
+			leafLevels,
+		)
+		if err != nil {
+			return err
+		}
+
+		for _, cell := range cells {
+			err = validateNode(
+				pager,
+				cell.ChildPageID,
+				pageID,
+				columns,
+				pkColumn,
+				visited,
+				leafLevels,
+			)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+
+	default:
+		return fmt.Errorf(
+			"unknown page type %d at page %d",
+			header.PageType,
+			pageID,
+		)
+	}
 }
