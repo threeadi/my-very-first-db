@@ -185,6 +185,8 @@ func (x *Executor) CreateTable(stmt CreateTableStatement) error {
 		RecordCount:       0,
 		FirstRecordOffset: 0,
 		FreeStart:         IndexPageHeaderSize,
+		PrevLeaf:          InvalidPageID,
+		NextLeaf:          InvalidPageID,
 	}
 
 	EncodeIndexPageHeader(rootLeaf, h)
@@ -471,35 +473,20 @@ func scanTree(pager *Pager, page *Page, columns []ColumnDef) ([]Record, error) {
 
 	switch head.PageType {
 	case PageTypeLeaf:
-		return scanLeaf(page, columns)
+		return scanLeafChain(pager, page, columns)
 
 	case PageTypeInternal:
-		firstPageID, cells, err := readInternalCells(page)
+		firstPageID, _, err := readInternalCells(page)
 		if err != nil {
 			return nil, err
 		}
-		var childIDs []PageID = make([]PageID, 0, len(cells)+1)
-		childIDs = append(childIDs, firstPageID)
 
-		for _, cell := range cells {
-			childIDs = append(childIDs, cell.ChildPageID)
+		firstPage, err := pager.ReadPage(firstPageID)
+		if err != nil {
+			return nil, err
 		}
 
-		var records []Record
-
-		for _, id := range childIDs {
-			child, err := pager.ReadPage(id)
-			if err != nil {
-				return nil, err
-			}
-			result, err := scanTree(pager, child, columns)
-			if err != nil {
-				return nil, err
-			}
-			records = append(records, result...)
-		}
-
-		return records, nil
+		return scanTree(pager, firstPage, columns)
 
 	default:
 		return nil, ErrCorruptTableFile
@@ -523,6 +510,43 @@ func scanLeaf(page *Page, columns []ColumnDef) ([]Record, error) {
 
 		records = append(records, record)
 		recordOffset = nextOffset
+	}
+
+	return records, nil
+}
+
+func scanLeafChain(
+	pager *Pager,
+	page *Page,
+	columns []ColumnDef,
+) ([]Record, error) {
+	var records []Record
+
+	for {
+		head, err := DecodeIndexPageHeader(page)
+		if err != nil {
+			return nil, err
+		}
+
+		if head.PageType != PageTypeLeaf {
+			return nil, ErrCorruptTableFile
+		}
+
+		result, err := scanLeaf(page, columns)
+		if err != nil {
+			return nil, err
+		}
+
+		records = append(records, result...)
+
+		if head.NextLeaf == InvalidPageID {
+			break
+		}
+
+		page, err = pager.ReadPage(head.NextLeaf)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return records, nil
@@ -618,6 +642,8 @@ func splitInternalPage(
 			PageID:   root.ID,
 			ParentID: InvalidPageID,
 			Level:    rightHeader.Level + 1,
+			PrevLeaf: InvalidPageID,
+			NextLeaf: InvalidPageID,
 		})
 
 		err = rewriteInternal(root, internal.ID, []InternalCell{
@@ -711,6 +737,8 @@ func splitLeaf(
 		return errors.New("splitLeaf tidak untuk root leaf")
 	}
 
+	oldNextLeaf := leafHeader.NextLeaf
+
 	records, err := readLeafRecords(leafPage, cols, pkColIdx)
 	if err != nil {
 		return err
@@ -742,6 +770,11 @@ func splitLeaf(
 		return err
 	}
 
+	leafHeader, err = DecodeIndexPageHeader(leafPage)
+	if err != nil {
+		return err
+	}
+
 	rightPage, err := pager.AllocatePage()
 	if err != nil {
 		return err
@@ -755,9 +788,18 @@ func splitLeaf(
 		RecordCount:       0,
 		FirstRecordOffset: 0,
 		FreeStart:         IndexPageHeaderSize,
+		PrevLeaf:          leafHeader.PageID,
+		NextLeaf:          oldNextLeaf,
 	})
 
+	leafHeader.NextLeaf = rightPage.ID
+	EncodeIndexPageHeader(leafPage, leafHeader)
+
 	if err = rewriteLeaf(rightPage, rightRecords, cols); err != nil {
+		return err
+	}
+
+	if err := pager.WritePage(leafPage); err != nil {
 		return err
 	}
 
@@ -769,6 +811,26 @@ func splitLeaf(
 	parentPage, err := pager.ReadPage(leafHeader.ParentID)
 	if err != nil {
 		return err
+	}
+
+	if oldNextLeaf != InvalidPageID {
+		nextPage, err := pager.ReadPage(oldNextLeaf)
+		if err != nil {
+			return err
+		}
+
+		nextHeader, err := DecodeIndexPageHeader(nextPage)
+		if err != nil {
+			return err
+		}
+
+		nextHeader.PrevLeaf = rightPage.ID
+
+		EncodeIndexPageHeader(nextPage, nextHeader)
+
+		if err := pager.WritePage(nextPage); err != nil {
+			return err
+		}
 	}
 
 	err = insertInternalCell(parentPage, separatorKey, rightPage.ID)
@@ -856,6 +918,8 @@ func splitRootLeaf(
 		RecordCount:       0,
 		FirstRecordOffset: 0,
 		FreeStart:         IndexPageHeaderSize,
+		PrevLeaf:          rootPage.ID,
+		NextLeaf:          InvalidPageID,
 	}
 
 	EncodeIndexPageHeader(rightPage, rightHeader)
@@ -896,6 +960,8 @@ func splitRootLeaf(
 		// + separator 4
 		// + RightChild 4
 		FreeStart: IndexPageHeaderSize + 12,
+		PrevLeaf:  InvalidPageID,
+		NextLeaf:  InvalidPageID,
 	}
 
 	EncodeIndexPageHeader(parentPage, headerParent)
@@ -933,6 +999,8 @@ func splitRootLeaf(
 
 	leftHeader.ParentID = parentPage.ID
 	leftHeader.Level = 0
+	leftHeader.PrevLeaf = InvalidPageID
+	leftHeader.NextLeaf = rightHeader.PageID
 
 	EncodeIndexPageHeader(rootPage, leftHeader)
 

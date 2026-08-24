@@ -505,6 +505,8 @@ func rewriteInternal(page *Page, firstChild PageID, cells []InternalCell) error 
 	header.RecordCount = uint16(len(cells))
 	header.FirstRecordOffset = 0
 	header.FreeStart = uint16(requiredSize)
+	header.PrevLeaf = InvalidPageID
+	header.NextLeaf = InvalidPageID
 
 	offset := IndexPageHeaderSize
 	binary.LittleEndian.PutUint32(page.Data[offset:offset+4], uint32(firstChild))
@@ -626,7 +628,7 @@ func rewriteLeaf(page *Page, records []LeafRecord, columns []ColumnDef) error {
 		return err
 	}
 	page.Data = [PageSize]byte{}
-	header.RecordCount = 0
+	header.RecordCount = uint16(len(records))
 	header.FirstRecordOffset = 0
 	header.FreeStart = IndexPageHeaderSize
 
@@ -668,8 +670,6 @@ func rewriteLeaf(page *Page, records []LeafRecord, columns []ColumnDef) error {
 			page.Data[pos:pos+2],
 			nextOffset,
 		)
-
-		header.RecordCount++
 	}
 	header.FreeStart = currentOffset
 	EncodeIndexPageHeader(page, header)
@@ -743,6 +743,10 @@ func EncodeIndexPageHeader(page *Page, h IndexPageHeader) {
 	binary.LittleEndian.PutUint16(page.Data[13:15], h.FirstRecordOffset)
 
 	binary.LittleEndian.PutUint16(page.Data[15:17], h.FreeStart)
+
+	binary.LittleEndian.PutUint32(page.Data[17:21], uint32(h.PrevLeaf))
+
+	binary.LittleEndian.PutUint32(page.Data[21:25], uint32(h.NextLeaf))
 }
 
 func DecodeIndexPageHeader(page *Page) (IndexPageHeader, error) {
@@ -772,6 +776,16 @@ func DecodeIndexPageHeader(page *Page) (IndexPageHeader, error) {
 	}
 
 	_, err = binary.Decode(page.Data[15:17], binary.LittleEndian, &h.FreeStart)
+	if err != nil {
+		return h, err
+	}
+
+	_, err = binary.Decode(page.Data[17:21], binary.LittleEndian, &h.PrevLeaf)
+	if err != nil {
+		return h, err
+	}
+
+	_, err = binary.Decode(page.Data[21:25], binary.LittleEndian, &h.NextLeaf)
 	if err != nil {
 		return h, err
 	}

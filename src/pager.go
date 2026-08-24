@@ -8,7 +8,7 @@ import (
 
 const PageSize uint16 = 4096 // 4 KB
 
-const IndexPageHeaderSize = 17 // 17 byte
+const IndexPageHeaderSize = 25 // byte
 
 type PageID uint32
 
@@ -34,7 +34,6 @@ const (
 
 const InvalidPageID PageID = ^PageID(0)
 
-// 17 bytes header
 type IndexPageHeader struct {
 	PageType          PageType
 	PageID            PageID
@@ -43,6 +42,9 @@ type IndexPageHeader struct {
 	RecordCount       uint16
 	FirstRecordOffset uint16
 	FreeStart         uint16
+
+	PrevLeaf PageID
+	NextLeaf PageID
 }
 
 type Pager struct {

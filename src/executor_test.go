@@ -22,12 +22,7 @@ func TestCreateEmptyTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		err = pager.Close()
-		if err == nil {
-			os.Remove(path)
-		}
-	}()
+	defer pager.Close()
 
 	page, err := pager.ReadPage(PageID(0))
 	if err != nil {
@@ -117,7 +112,6 @@ func TestInsertSingleLeafOrdered(t *testing.T) {
 	executor := NewExecutor(config, catalog)
 	defer func() {
 		executor.Close()
-		os.RemoveAll(tempDir)
 	}()
 	err := executor.CreateDatabase(CreateDatabaseStatement{
 		DBName: "testdb",
@@ -299,7 +293,6 @@ func TestInsertSplitRootLeaf(t *testing.T) {
 	defer func() {
 		pager.Close()
 		executor.Close()
-		os.RemoveAll(path)
 	}()
 
 	metaPage, err := pager.ReadPage(PageID(0))
@@ -501,7 +494,6 @@ func TestInsertSplitLeafSameRoot(t *testing.T) {
 	defer func() {
 		pager.Close()
 		executor.Close()
-		os.RemoveAll(path)
 	}()
 
 	metaPage, err := pager.ReadPage(PageID(0))
@@ -646,7 +638,6 @@ func TestSplitRootInternal(t *testing.T) {
 	defer func() {
 		pager.Close()
 		executor.Close()
-		os.RemoveAll(path)
 	}()
 
 	metaPage, err := pager.ReadPage(0)
@@ -676,7 +667,7 @@ func TestSplitRootInternal(t *testing.T) {
 
 func TestMultiLevelTreeInsertAndSelect(t *testing.T) {
 	tempDir := t.TempDir()
-	fmt.Println("tempDir: ", tempDir)
+	t.Log("tempDir: ", tempDir)
 
 	config := &Config{
 		DataDirectory: tempDir + string(os.PathSeparator),
@@ -690,7 +681,6 @@ func TestMultiLevelTreeInsertAndSelect(t *testing.T) {
 	executor := NewExecutor(config, catalog)
 	defer func() {
 		executor.Close()
-		os.RemoveAll(tempDir)
 	}()
 
 	err := executor.CreateDatabase(
@@ -762,7 +752,22 @@ func TestMultiLevelTreeInsertAndSelect(t *testing.T) {
 			break
 		}
 	}
+	cols, err := catalog.GetTableColumns("testdb", "users")
+	if err != nil {
+		t.Fatal(err)
+	}
 
+	pager, err := OpenPager(filepath.Join(config.DataDirectory, "testdb", "users.3tbl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pager.Close()
+
+	if err = ValidateTree(pager, cols, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Log("the tree is valid")
 	res, err := executor.Select(SelectStatement{
 		DBName:  "testdb",
 		Table:   "users",
@@ -785,35 +790,18 @@ func TestMultiLevelTreeInsertAndSelect(t *testing.T) {
 		}
 	}
 
-	fmt.Println("total missing:", len(missing))
+	t.Log("total missing:", len(missing))
 	if len(missing) > 0 {
-		fmt.Println("first missing:", missing[0], "last missing:", missing[len(missing)-1])
-		fmt.Println("sample:", missing[:min(20, len(missing))])
+		t.Log("first missing:", missing[0], "last missing:", missing[len(missing)-1])
+		t.Log("sample:", missing[:min(20, len(missing))])
 	}
 
 	assert.Equal(t, recordsTotal, len(res.Records))
-	cols, err := catalog.GetTableColumns("testdb", "users")
-	if err != nil {
-		t.Fatal(err)
-	}
-	pager, err := OpenPager(filepath.Join(config.DataDirectory, "testdb", "users.3tbl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pager.Close()
-
-	if err = ValidateTree(pager, cols, 0); err != nil {
-		t.Fatal(err)
-	}
-	fmt.Println("the tree is valid")
 }
 
 func TestRestartInsertAndSelect(t *testing.T) {
 	tempDir := t.TempDir()
-	fmt.Println("tempDir: ", tempDir)
-	if err := os.RemoveAll(tempDir); err != nil {
-		t.Fatal(err)
-	}
+	t.Log("tempDir: ", tempDir)
 
 	config := &Config{
 		DataDirectory: tempDir + string(os.PathSeparator),
@@ -923,7 +911,7 @@ func TestRestartInsertAndSelect(t *testing.T) {
 	if err = ValidateTree(pager, cols, 0); err != nil {
 		t.Fatal(err)
 	}
-	fmt.Println("the tree is valid")
+	t.Log("the tree is valid")
 }
 
 func createLargeString() string {
@@ -1009,6 +997,64 @@ func validateNode(
 
 	switch header.PageType {
 	case PageTypeLeaf:
+		if header.PrevLeaf != InvalidPageID {
+			prevLeaf, err := pager.ReadPage(header.PrevLeaf)
+			if err != nil {
+				return err
+			}
+
+			prevHead, err := DecodeIndexPageHeader(prevLeaf)
+			if err != nil {
+				return err
+			}
+
+			if prevHead.PageType != PageTypeLeaf {
+				return fmt.Errorf(
+					"leaf %d PrevLeaf=%d points to non-leaf",
+					header.PageID,
+					header.PrevLeaf,
+				)
+			}
+
+			if prevHead.NextLeaf != header.PageID {
+				return fmt.Errorf(
+					"prev leaf linkage broken. current=%d prev=%d prev.Next=%d",
+					header.PageID,
+					header.PrevLeaf,
+					prevHead.NextLeaf,
+				)
+			}
+		}
+
+		if header.NextLeaf != InvalidPageID {
+			nextLeaf, err := pager.ReadPage(header.NextLeaf)
+			if err != nil {
+				return err
+			}
+
+			nextHead, err := DecodeIndexPageHeader(nextLeaf)
+			if err != nil {
+				return err
+			}
+
+			if nextHead.PageType != PageTypeLeaf {
+				return fmt.Errorf(
+					"leaf %d NextLeaf=%d points to non-leaf",
+					header.PageID,
+					header.NextLeaf,
+				)
+			}
+
+			if nextHead.PrevLeaf != header.PageID {
+				return fmt.Errorf(
+					"next leaf linkage broken. current=%d next=%d next.Prev=%d",
+					header.PageID,
+					header.NextLeaf,
+					nextHead.PrevLeaf,
+				)
+			}
+		}
+
 		records, err := readLeafRecords(
 			page,
 			columns,
@@ -1060,6 +1106,16 @@ func validateNode(
 		firstChild, cells, err := readInternalCells(page)
 		if err != nil {
 			return err
+		}
+
+		if header.PrevLeaf != InvalidPageID || header.NextLeaf != InvalidPageID {
+			return fmt.Errorf(
+				"page %d is not leaf but have prev leaf id or next leaf id. expected=%d prevLeaf=%d, leafLeaf=%d",
+				pageID,
+				InvalidPageID,
+				header.PrevLeaf,
+				header.NextLeaf,
+			)
 		}
 
 		if len(cells) != int(header.RecordCount) {

@@ -236,7 +236,7 @@ func (p *Parser) parseColumns() ([]ColumnDef, error) {
 			nullable = false
 		}
 
-		if !pk && p.pos < len(p.Tokens) && p.Tokens[p.pos].Type == KEYWORD && p.Tokens[p.pos].Literal == "not" {
+		if p.pos < len(p.Tokens) && p.Tokens[p.pos].Type == KEYWORD && p.Tokens[p.pos].Literal == "not" {
 			p.pos++
 			if p.pos < len(p.Tokens) && p.Tokens[p.pos].Type == KEYWORD && p.Tokens[p.pos].Literal == "null" {
 				nullable = false
@@ -271,7 +271,7 @@ func (p *Parser) parseColumns() ([]ColumnDef, error) {
 		}
 
 		if pk && nullable {
-			return columns, fmt.Errorf("PRIMARY KEY hanya boleh NULLABLE")
+			return columns, fmt.Errorf("PRIMARY KEY tidak boleh NULLABLE")
 		}
 
 		if pk && valueType != IntType {

@@ -175,7 +175,7 @@ Target ini sengaja ditempatkan setelah storage dasar karena clustered tree **ada
 - [x] Identitas logis row adalah primary key, bukan offset fisik record.
 - [ ] Secondary index nantinya menyimpan `(secondary_key, primary_key)`, lalu lookup dilanjutkan ke clustered tree.
 - [x] Leaf sudah menyimpan full row; format internal node sudah diimplementasikan (`InternalCell`, `readInternalCells`, `rewriteInternal`).
-- [ ] Semua leaf berada pada depth yang sama dan terhubung dengan `next_leaf` untuk sequential/range scan. — `next_leaf` belum ada; full scan saat ini pakai traversal rekursif dari root, bukan ikatan leaf.
+- [x] Semua leaf berada pada depth yang sama dan terhubung dengan `next_leaf` untuk sequential/range scan.
 - [x] Gunakan invariant separator: setiap separator adalah key terkecil pada child di sebelah kanan. — Ditegakkan di `targetPage()` dan `splitLeaf()`/`splitRootInternal()`.
 - [ ] Tidak perlu merge/rebalance saat delete pada versi pertama; tandai deleted atau compact satu leaf, tetapi tree harus tetap searchable.
 
@@ -243,7 +243,7 @@ Target ini sengaja ditempatkan setelah storage dasar karena clustered tree **ada
 - [x] Duplicate key sudah ditolak pada insert; perlu automated test bahwa bytes/tree tidak berubah.
 - [x] Persistence setelah reopen sudah terbukti manual melalui `SELECT`; automated restart test belum ada.
 - [x] Full scan pada single-leaf menghasilkan primary key terurut melalui chain `NextOffset`.
-- [x] Semua leaf memiliki depth yang sama.; 
+- [x] Semua leaf memiliki depth yang sama.;
 - [ ] Parent pointer, child pointer, separator, dan sibling link valid setelah setiap split.
 - [x] Root split lebih dari sekali sudah diuji (`TestSplitRootInternal` dengan 2045 insert → level 2).
 - [ ] Fuzz urutan insert dan bandingkan hasilnya dengan `map[int32]Row` + sorted keys.
@@ -487,6 +487,7 @@ Untuk setiap item:
 - Posisi fisik record di page boleh berbeda dari urutan logis primary key.
 
 ## Setelah versi pertama selesai
+
 - [ ] Buffer pool dan page replacement.
 - [ ] Optimasi lanjutan B+ tree: merge/rebalance delete, bulk loading, prefix compression, dan page compaction.
 - [ ] Free-page list dan vacuum/compaction.
