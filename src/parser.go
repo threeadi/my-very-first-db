@@ -69,14 +69,34 @@ type SelectStatement struct {
 	DBName  string
 	Table   string
 	Columns []string
-	Cons    Condition
+	Cons    *WhereClause
 	Sort    Sort
 }
 
-type Condition struct {
-	Key string
-	Op  string
-	Val any
+type CompareOp int
+
+const (
+	OpEq  CompareOp = iota // =
+	OpNeq                  // <>
+	OpGt                   // >
+	OpGte                  // >=
+	OpLt                   // <
+	OpLte                  // <=
+)
+
+type LogicOp int
+
+const (
+	AND LogicOp = iota
+	OR
+)
+
+type WhereClause struct {
+	Key       string
+	Op        CompareOp
+	Val       any
+	Logic     LogicOp
+	Condition []*WhereClause
 }
 
 type Sort struct {
@@ -357,10 +377,108 @@ func (p *Parser) parseSelect() (Statement, error) {
 	table := p.Tokens[p.pos].Literal
 	p.pos++
 
-	return SelectStatement{
+	stmt := SelectStatement{
 		DBName:  currentDatabase,
 		Table:   table,
 		Columns: columns,
+	}
+
+	if p.pos < len(p.Tokens) && p.Tokens[p.pos].Type == KEYWORD && p.Tokens[p.pos].Literal == "where" {
+		p.pos++
+		cond, err := p.parseWhere()
+		if err != nil {
+			return nil, err
+		}
+		stmt.Cons = cond
+	}
+
+	return stmt, nil
+}
+
+func (p *Parser) parseWhere() (*WhereClause, error) {
+	condition, err := p.parseComparison()
+	if err != nil {
+		return nil, err
+	}
+
+	for p.pos < len(p.Tokens) &&
+		p.Tokens[p.pos].Type == KEYWORD &&
+		(p.Tokens[p.pos].Literal == "and" || p.Tokens[p.pos].Literal == "or") {
+
+		var logic LogicOp
+		switch p.Tokens[p.pos].Literal {
+		case "and":
+			logic = AND
+		case "or":
+			logic = OR
+		}
+		p.pos++ // lewati AND/OR
+
+		next, err := p.parseComparison()
+		if err != nil {
+			return nil, err
+		}
+		next.Logic = logic
+
+		condition.Condition = append(condition.Condition, next)
+	}
+
+	return condition, nil
+}
+
+// parseComparison "<kolom> <operator> <nilai>"
+func (p *Parser) parseComparison() (*WhereClause, error) {
+	if p.pos >= len(p.Tokens) {
+		return nil, fmt.Errorf("%w: diharapkan nama kolom setelah WHERE", ErrUnexpectedEOF)
+	}
+	if p.Tokens[p.pos].Type != IDENT {
+		return nil, fmt.Errorf("%w: diharapkan nama kolom setelah WHERE, tapi dapat: %s", ErrInvalidStatement, p.Tokens[p.pos].Literal)
+	}
+
+	key := p.Tokens[p.pos].Literal
+	p.pos++
+
+	if p.pos >= len(p.Tokens) {
+		return nil, fmt.Errorf("%w: diharapkan operator perbandingan", ErrUnexpectedEOF)
+	}
+	if p.Tokens[p.pos].Type != OPERATOR {
+		return nil, fmt.Errorf("%w: diharapkan operator (=, <>, >, >=, <, <=), tapi dapat: %s", ErrInvalidStatement, p.Tokens[p.pos].Literal)
+	}
+
+	var op CompareOp
+	switch p.Tokens[p.pos].Literal {
+	case "=":
+		op = OpEq
+	case "<>", "!=":
+		op = OpNeq
+	case ">":
+		op = OpGt
+	case ">=":
+		op = OpGte
+	case "<":
+		op = OpLt
+	case "<=":
+		op = OpLte
+	default:
+		return nil, fmt.Errorf("%w: operator tidak dikenal: %s", ErrInvalidStatement, p.Tokens[p.pos].Literal)
+	}
+	p.pos++
+
+	if p.pos >= len(p.Tokens) {
+		return nil, fmt.Errorf("%w: diharapkan nilai setelah operator", ErrUnexpectedEOF)
+	}
+
+	valueToken := p.Tokens[p.pos]
+	isNull := valueToken.Type == KEYWORD && valueToken.Literal == "null"
+	if valueToken.Type != NUMBER && valueToken.Type != STRING && !isNull {
+		return nil, fmt.Errorf("%w: nilai WHERE harus berupa angka, string, atau NULL", ErrInvalidStatement)
+	}
+	p.pos++
+
+	return &WhereClause{
+		Key: key,
+		Op:  op,
+		Val: valueToken.Literal,
 	}, nil
 }
 

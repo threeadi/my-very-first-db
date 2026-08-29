@@ -455,7 +455,7 @@ func (x *Executor) Select(stmt SelectStatement) (ResultSet, error) {
 		return ResultSet{}, err
 	}
 
-	records, err := scanTree(pager, rootPage, columns)
+	records, err := scanTree(pager, rootPage, columns, stmt.Cons)
 	if err != nil {
 		return ResultSet{}, err
 	}
@@ -465,7 +465,7 @@ func (x *Executor) Select(stmt SelectStatement) (ResultSet, error) {
 	return resultSet, nil
 }
 
-func scanTree(pager *Pager, page *Page, columns []ColumnDef) ([]Record, error) {
+func scanTree(pager *Pager, page *Page, columns []ColumnDef, wc *WhereClause) ([]Record, error) {
 	head, err := DecodeIndexPageHeader(page)
 	if err != nil {
 		return nil, err
@@ -473,7 +473,7 @@ func scanTree(pager *Pager, page *Page, columns []ColumnDef) ([]Record, error) {
 
 	switch head.PageType {
 	case PageTypeLeaf:
-		return scanLeafChain(pager, page, columns)
+		return scanLeafChain(pager, page, columns, wc)
 
 	case PageTypeInternal:
 		firstPageID, _, err := readInternalCells(page)
@@ -486,14 +486,14 @@ func scanTree(pager *Pager, page *Page, columns []ColumnDef) ([]Record, error) {
 			return nil, err
 		}
 
-		return scanTree(pager, firstPage, columns)
+		return scanTree(pager, firstPage, columns, wc)
 
 	default:
 		return nil, ErrCorruptTableFile
 	}
 }
 
-func scanLeaf(page *Page, columns []ColumnDef) ([]Record, error) {
+func scanLeaf(page *Page, columns []ColumnDef, wc *WhereClause) ([]Record, error) {
 	rootHead, err := DecodeIndexPageHeader(page)
 	if err != nil {
 		return nil, err
@@ -508,7 +508,14 @@ func scanLeaf(page *Page, columns []ColumnDef) ([]Record, error) {
 			return nil, err
 		}
 
-		records = append(records, record)
+		match, err := evaluateWhereClause(record, columns, wc)
+		if err != nil {
+			return nil, err
+		}
+		if match {
+			records = append(records, record)
+		}
+
 		recordOffset = nextOffset
 	}
 
@@ -519,6 +526,7 @@ func scanLeafChain(
 	pager *Pager,
 	page *Page,
 	columns []ColumnDef,
+	wc *WhereClause,
 ) ([]Record, error) {
 	var records []Record
 
@@ -532,7 +540,7 @@ func scanLeafChain(
 			return nil, ErrCorruptTableFile
 		}
 
-		result, err := scanLeaf(page, columns)
+		result, err := scanLeaf(page, columns, wc)
 		if err != nil {
 			return nil, err
 		}

@@ -1489,3 +1489,333 @@ func validateNode(
 		)
 	}
 }
+
+
+// ---------------------------------------------------------------------------
+// Executor-level: memastikan Select benar-benar memfilter data nyata sesuai
+// Cons -- ini yang membuktikan evaluateWhereClause/evaluatePredicate jalan,
+// bukan cuma struct-nya benar dibentuk parser.
+// ---------------------------------------------------------------------------
+
+func setupWhereTestExecutor(t *testing.T, columns []ColumnDef) *Executor {
+	t.Helper()
+
+	tempDir := t.TempDir()
+	config := &Config{
+		DataDirectory: tempDir + string(os.PathSeparator),
+		CatalogPath:   filepath.Join(tempDir, "catalog.json"),
+	}
+	catalog := NewCatalog()
+	executor := NewExecutor(config, catalog)
+
+	if err := executor.CreateDatabase(CreateDatabaseStatement{DBName: "testdb"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := executor.CreateTable(CreateTableStatement{
+		DBName:  "testdb",
+		Table:   "users",
+		Columns: columns,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	return executor
+}
+
+func insertRows(t *testing.T, executor *Executor, rows [][]string) {
+	t.Helper()
+	for _, row := range rows {
+		if err := executor.Insert(InsertStatement{
+			DBName: "testdb",
+			Table:  "users",
+			Values: row,
+		}); err != nil {
+			t.Fatalf("insert %v gagal: %v", row, err)
+		}
+	}
+}
+
+func selectPKs(t *testing.T, executor *Executor, where *WhereClause) []int32 {
+	t.Helper()
+
+	res, err := executor.Select(SelectStatement{
+		DBName:  "testdb",
+		Table:   "users",
+		Columns: []string{"*"},
+		Cons:    where,
+	})
+	if err != nil {
+		t.Fatalf("select gagal: %v", err)
+	}
+
+	pks := make([]int32, len(res.Records))
+	for i, rec := range res.Records {
+		pk, ok := rec[0].Value.(int32)
+		if !ok {
+			t.Fatalf("record %d: PK bukan int32: %v", i, rec[0].Value)
+		}
+		pks[i] = pk
+	}
+	return pks
+}
+
+var basicUserColumns = []ColumnDef{
+	{Name: "id", ValueType: IntType, Primary: true, Nullable: false},
+	{Name: "name", ValueType: VarcharType, Nullable: false},
+}
+
+func TestSelectWhereEquals(t *testing.T) {
+	executor := setupWhereTestExecutor(t, basicUserColumns)
+	defer executor.Close()
+
+	insertRows(t, executor, [][]string{
+		{"1", "andi"},
+		{"2", "budi"},
+		{"3", "citra"},
+	})
+
+	pks := selectPKs(t, executor, &WhereClause{Key: "id", Op: OpEq, Val: "2"})
+	assert.Equal(t, pks, []int32{2})
+}
+
+func TestSelectWhereNotEquals(t *testing.T) {
+	executor := setupWhereTestExecutor(t, basicUserColumns)
+	defer executor.Close()
+
+	insertRows(t, executor, [][]string{
+		{"1", "andi"},
+		{"2", "budi"},
+		{"3", "citra"},
+	})
+
+	pks := selectPKs(t, executor, &WhereClause{Key: "id", Op: OpNeq, Val: "2"})
+	assert.Equal(t, pks, []int32{1, 3})
+}
+
+func TestSelectWhereComparisonOperators(t *testing.T) {
+	executor := setupWhereTestExecutor(t, basicUserColumns)
+	defer executor.Close()
+
+	var rows [][]string
+	for i := 1; i <= 10; i++ {
+		rows = append(rows, []string{strconv.Itoa(i), "user" + strconv.Itoa(i)})
+	}
+	insertRows(t, executor, rows)
+
+	tests := []struct {
+		name string
+		op   CompareOp
+		val  string
+		want []int32
+	}{
+		{"gt", OpGt, "7", []int32{8, 9, 10}},
+		{"gte", OpGte, "7", []int32{7, 8, 9, 10}},
+		{"lt", OpLt, "3", []int32{1, 2}},
+		{"lte", OpLte, "3", []int32{1, 2, 3}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pks := selectPKs(t, executor, &WhereClause{Key: "id", Op: tc.op, Val: tc.val})
+			assert.Equal(t, pks, tc.want)
+		})
+	}
+}
+
+func TestSelectWhereVarcharEquals(t *testing.T) {
+	executor := setupWhereTestExecutor(t, basicUserColumns)
+	defer executor.Close()
+
+	insertRows(t, executor, [][]string{
+		{"1", "andi"},
+		{"2", "budi"},
+		{"3", "andi"},
+	})
+
+	pks := selectPKs(t, executor, &WhereClause{Key: "name", Op: OpEq, Val: "andi"})
+	assert.Equal(t, pks, []int32{1, 3})
+}
+
+func TestSelectWhereFloatComparison(t *testing.T) {
+	columns := []ColumnDef{
+		{Name: "id", ValueType: IntType, Primary: true, Nullable: false},
+		{Name: "price", ValueType: FloatType, Nullable: false},
+	}
+	executor := setupWhereTestExecutor(t, columns)
+	defer executor.Close()
+
+	insertRows(t, executor, [][]string{
+		{"1", "9.99"},
+		{"2", "19.99"},
+		{"3", "29.99"},
+	})
+
+	pks := selectPKs(t, executor, &WhereClause{Key: "price", Op: OpGte, Val: "19.99"})
+	assert.Equal(t, pks, []int32{2, 3})
+}
+
+func TestSelectWhereBoolean(t *testing.T) {
+	columns := []ColumnDef{
+		{Name: "id", ValueType: IntType, Primary: true, Nullable: false},
+		{Name: "active", ValueType: BooleanType, Nullable: false},
+	}
+	executor := setupWhereTestExecutor(t, columns)
+	defer executor.Close()
+
+	insertRows(t, executor, [][]string{
+		{"1", "true"},
+		{"2", "false"},
+		{"3", "true"},
+	})
+
+	pks := selectPKs(t, executor, &WhereClause{Key: "active", Op: OpEq, Val: "true"})
+	assert.Equal(t, pks, []int32{1, 3})
+
+	_, err := executor.Select(SelectStatement{
+		DBName:  "testdb",
+		Table:   "users",
+		Columns: []string{"*"},
+		Cons:    &WhereClause{Key: "active", Op: OpGt, Val: "true"},
+	})
+	if !errors.Is(err, ErrInvalidDataType) {
+		t.Fatalf("expected ErrInvalidDataType untuk operator > terhadap BOOLEAN, got: %v", err)
+	}
+}
+
+// TestSelectWhereAnd menguji chain AND lewat WhereClause.Condition langsung
+// (bypass parser) -- fokus ke evaluateWhereClause di executor.go.
+func TestSelectWhereAnd(t *testing.T) {
+	executor := setupWhereTestExecutor(t, basicUserColumns)
+	defer executor.Close()
+
+	insertRows(t, executor, [][]string{
+		{"1", "andi"},
+		{"2", "andi"},
+		{"3", "budi"},
+	})
+
+	// id > 1 AND name = 'andi' -> hanya id=2
+	pks := selectPKs(t, executor, &WhereClause{
+		Key: "id", Op: OpGt, Val: "1",
+		Condition: []*WhereClause{
+			{Key: "name", Op: OpEq, Val: "andi", Logic: AND},
+		},
+	})
+	assert.Equal(t, pks, []int32{2})
+}
+
+func TestSelectWhereOr(t *testing.T) {
+	executor := setupWhereTestExecutor(t, basicUserColumns)
+	defer executor.Close()
+
+	insertRows(t, executor, [][]string{
+		{"1", "andi"},
+		{"2", "budi"},
+		{"3", "citra"},
+	})
+
+	// id = 1 OR id = 3
+	pks := selectPKs(t, executor, &WhereClause{
+		Key: "id", Op: OpEq, Val: "1",
+		Condition: []*WhereClause{
+			{Key: "id", Op: OpEq, Val: "3", Logic: OR},
+		},
+	})
+	assert.Equal(t, pks, []int32{1, 3})
+}
+
+// TestSelectWhereAndOrChainLeftToRight menegaskan aturan evaluasi
+// evaluateWhereClause: "a AND b OR c" == (a AND b) OR c, kiri-ke-kanan,
+// TANPA precedence AND-sebelum-OR ala SQL standar.
+func TestSelectWhereAndOrChainLeftToRight(t *testing.T) {
+	executor := setupWhereTestExecutor(t, basicUserColumns)
+	defer executor.Close()
+
+	insertRows(t, executor, [][]string{
+		{"1", "andi"},  // a: id=1 true,  b: name=andi true  -> (a AND b)=true
+		{"2", "budi"},  // a: id=1 false, b: name=andi false -> (a AND b)=false; c: id=2 true -> OR true
+		{"3", "citra"}, // a false, b false -> false; c: id=2 false -> false
+	})
+
+	// id = 1 AND name = 'andi' OR id = 2
+	pks := selectPKs(t, executor, &WhereClause{
+		Key: "id", Op: OpEq, Val: "1",
+		Condition: []*WhereClause{
+			{Key: "name", Op: OpEq, Val: "andi", Logic: AND},
+			{Key: "id", Op: OpEq, Val: "2", Logic: OR},
+		},
+	})
+	assert.Equal(t, pks, []int32{1, 2})
+}
+
+func TestSelectWhereNull(t *testing.T) {
+	columns := []ColumnDef{
+		{Name: "id", ValueType: IntType, Primary: true, Nullable: false},
+		{Name: "nickname", ValueType: VarcharType, Nullable: true},
+	}
+	executor := setupWhereTestExecutor(t, columns)
+	defer executor.Close()
+
+	insertRows(t, executor, [][]string{
+		{"1", "NULL"},
+		{"2", "bee"},
+		{"3", "NULL"},
+	})
+
+	eqNull := selectPKs(t, executor, &WhereClause{Key: "nickname", Op: OpEq, Val: "NULL"})
+	assert.Equal(t, eqNull, []int32{1, 3})
+
+	neqNull := selectPKs(t, executor, &WhereClause{Key: "nickname", Op: OpNeq, Val: "NULL"})
+	assert.Equal(t, neqNull, []int32{2})
+}
+
+func TestSelectWhereNullWithOrderOperatorRejected(t *testing.T) {
+	columns := []ColumnDef{
+		{Name: "id", ValueType: IntType, Primary: true, Nullable: false},
+		{Name: "nickname", ValueType: VarcharType, Nullable: true},
+	}
+	executor := setupWhereTestExecutor(t, columns)
+	defer executor.Close()
+
+	insertRows(t, executor, [][]string{{"1", "NULL"}})
+
+	_, err := executor.Select(SelectStatement{
+		DBName:  "testdb",
+		Table:   "users",
+		Columns: []string{"*"},
+		Cons:    &WhereClause{Key: "nickname", Op: OpGt, Val: "NULL"},
+	})
+	if !errors.Is(err, ErrInvalidDataType) {
+		t.Fatalf("expected ErrInvalidDataType untuk operator > terhadap NULL, got: %v", err)
+	}
+}
+
+func TestSelectWhereUnknownColumn(t *testing.T) {
+	executor := setupWhereTestExecutor(t, basicUserColumns)
+	defer executor.Close()
+
+	insertRows(t, executor, [][]string{{"1", "andi"}})
+
+	_, err := executor.Select(SelectStatement{
+		DBName:  "testdb",
+		Table:   "users",
+		Columns: []string{"*"},
+		Cons:    &WhereClause{Key: "unknown_col", Op: OpEq, Val: "1"},
+	})
+	if !errors.Is(err, ErrColumnNotFound) {
+		t.Fatalf("expected ErrColumnNotFound, got: %v", err)
+	}
+}
+
+func TestSelectWithoutWhereReturnsAll(t *testing.T) {
+	executor := setupWhereTestExecutor(t, basicUserColumns)
+	defer executor.Close()
+
+	insertRows(t, executor, [][]string{
+		{"1", "andi"},
+		{"2", "budi"},
+	})
+
+	pks := selectPKs(t, executor, nil)
+	assert.Equal(t, pks, []int32{1, 2})
+}

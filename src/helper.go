@@ -852,3 +852,134 @@ func updateChildrenParentID(
 
 	return nil
 }
+
+func evaluateWhereClause(record Record, columns []ColumnDef, wc *WhereClause) (bool, error) {
+	if wc == nil {
+		return true, nil
+	}
+
+	result, err := evaluatePredicate(record, columns, wc)
+	if err != nil {
+		return false, err
+	}
+
+	for _, next := range wc.Condition {
+		nextResult, err := evaluateWhereClause(record, columns, next)
+		if err != nil {
+			return false, err
+		}
+
+		switch next.Logic {
+		case AND:
+			result = result && nextResult
+		case OR:
+			result = result || nextResult
+		default:
+			return false, fmt.Errorf("%w: logic operator tidak dikenal", ErrInvalidStatement)
+		}
+	}
+
+	return result, nil
+}
+
+func evaluatePredicate(record Record, columns []ColumnDef, wc *WhereClause) (bool, error) {
+	colIdx := -1
+	var colDef ColumnDef
+	for i, col := range columns {
+		if col.Name == wc.Key {
+			colIdx = i
+			colDef = col
+			break
+		}
+	}
+	if colIdx == -1 {
+		return false, fmt.Errorf("%w: kolom %s pada WHERE", ErrColumnNotFound, wc.Key)
+	}
+
+	rawVal, ok := wc.Val.(string)
+	if !ok {
+		return false, fmt.Errorf("%w: nilai WHERE tidak valid", ErrInvalidDataType)
+	}
+
+	wantValue, err := parseValue(rawVal, colDef.ValueType)
+	if err != nil {
+		return false, err
+	}
+
+	got := record[colIdx]
+
+	if got.Null || wantValue == nil {
+		switch wc.Op {
+		case OpEq:
+			return got.Null && wantValue == nil, nil
+		case OpNeq:
+			return !(got.Null && wantValue == nil), nil
+		default:
+			return false, fmt.Errorf("%w: operator selain = / <> tidak berlaku untuk NULL", ErrInvalidDataType)
+		}
+	}
+
+	switch colDef.ValueType {
+	case IntType:
+		a, aok := got.Value.(int32)
+		b, bok := wantValue.(int32)
+		if !aok || !bok {
+			return false, ErrInvalidDataType
+		}
+		return compareOrdered(int64(a), int64(b), wc.Op)
+
+	case FloatType:
+		a, aok := got.Value.(float32)
+		b, bok := wantValue.(float32)
+		if !aok || !bok {
+			return false, ErrInvalidDataType
+		}
+		return compareOrdered(float64(a), float64(b), wc.Op)
+
+	case VarcharType:
+		a, aok := got.Value.(string)
+		b, bok := wantValue.(string)
+		if !aok || !bok {
+			return false, ErrInvalidDataType
+		}
+		return compareOrdered(a, b, wc.Op)
+
+	case BooleanType:
+		a, aok := got.Value.(bool)
+		b, bok := wantValue.(bool)
+		if !aok || !bok {
+			return false, ErrInvalidDataType
+		}
+		if wc.Op != OpEq && wc.Op != OpNeq {
+			return false, fmt.Errorf("%w: operator selain = / <> tidak berlaku untuk BOOLEAN", ErrInvalidDataType)
+		}
+		if wc.Op == OpEq {
+			return a == b, nil
+		}
+		return a != b, nil
+
+	default:
+		return false, ErrInvalidDataType
+	}
+}
+
+func compareOrdered[T int64 | float64 | string](a, b T, op CompareOp) (bool, error) {
+	switch op {
+	case OpEq:
+		return a == b, nil
+	case OpNeq:
+		return a != b, nil
+	case OpGt:
+		return a > b, nil
+	case OpGte:
+		return a >= b, nil
+	case OpLt:
+		return a < b, nil
+	case OpLte:
+		return a <= b, nil
+	default:
+		return false, fmt.Errorf("%w: operator tidak dikenal", ErrInvalidDataType)
+	}
+}
+
+
