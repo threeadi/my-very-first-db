@@ -80,7 +80,7 @@ Catatan: susunan ini adalah model belajar. Nanti planner boleh mengubah urutan i
 - [x] Tentukan apakah nama bersifat case-sensitive.
 - [x] Tentukan tipe data awal dan representasi nilai `NULL`.
 - [~] Tentukan batas ukuran text dan ukuran page. — `PageSize = 4096` sudah aktif dan insert menolak record yang melewati batas page; batas maksimum VARCHAR/record formal masih perlu diselaraskan dengan kontrak storage.
-- [~] Tentukan format direktori dan nama file di disk. — Sudah ada `DataDirectory`, `CatalogPath`, dan ekstensi `.3tbl`; path creation masih perlu dirapikan dengan `filepath.Join`.
+- [x] Tentukan format direktori dan nama file di disk. — Sudah ada `DataDirectory`, `CatalogPath`, dan ekstensi `.3tbl`; path creation masih perlu dirapikan dengan `filepath.Join`.
 - [~] Tentukan format metadata katalog dan nomor versinya. — Catalog JSON sudah ada, tetapi belum memiliki `catalog_version` dan metadata primary/index.
 - [x] Tentukan format record: varlen metadata, null bitmap, flags, `NextOffset`, lalu payload kolom. — Sudah dipakai oleh `encodeRecord()` dan `decodeRecord()`.
 - [x] Tentukan identitas stabil sebuah record. — Untuk clustered tree, **primary key adalah identitas logis**; offset record di page hanya lokasi fisik yang dapat berubah.
@@ -117,7 +117,7 @@ Sebelum implementasi, tulis contoh input dan hasil yang diharapkan.
 - [~] Kasus tipe nilai salah. — Validasi insert tersedia, tetapi belum ada test dan range check `int32`.
 - [~] Kasus tabel kosong. — Formatter menangani hasil tanpa row, tetapi belum diuji otomatis.
 - [~] Kasus text kosong, nilai negatif, dan nilai besar. — String kosong dapat direpresentasikan; angka negatif belum dikenali lexer dan nilai besar belum memiliki range check.
-- [~] Kasus database ditutup lalu dibuka kembali. — Sudah diverifikasi manual bahwa row tetap terbaca setelah restart; automated restart test belum ada.
+- [x] Kasus database ditutup lalu dibuka kembali. 
 - [~] Pisahkan error syntax, semantic, constraint, dan I/O. — Sentinel sudah dikelompokkan secara nama, tetapi belum menjadi typed/category error yang konsisten.
 
 **Lulus jika:** perilaku yang diinginkan dapat diuji tanpa perlu mengetahui detail implementasi.
@@ -157,7 +157,7 @@ Storage dasar sekarang sudah memakai page tetap 4096 byte dan menjadi fondasi cl
 - [x] Dapat membaca kembali record dari disk menggunakan schema tabel.
 - [x] Dapat scan seluruh record pada satu leaf melalui `FirstRecordOffset` dan `NextOffset`.
 - [x] Persistence manual: row tetap identik setelah program ditutup dan dibuka kembali.
-- [ ] Validasi magic number, version, page type, dan boundary record secara ketat saat read/open.
+- [x] Validasi magic number, version, page type, dan boundary record secara ketat saat read/open.
 - [ ] Tambahkan automated round-trip/restart test untuk seluruh tipe data dan NULL.
 - [ ] Tombstone/delete-mark belum dipakai oleh DELETE.
 
@@ -181,23 +181,23 @@ Target ini sengaja ditempatkan setelah storage dasar karena clustered tree **ada
 
 ### Blocker / hardening sebelum split
 
-- [ ] Perbaiki lexer agar trailing whitespace tidak mengakses index di luar string.
-- [ ] Tambahkan token terminator `;` atau secara eksplisit strip terminator sebelum tokenize.
+- [x] Perbaiki lexer agar trailing whitespace tidak mengakses index di luar string.
+- [x] Tambahkan token terminator `;` atau secara eksplisit strip terminator sebelum tokenize.
 - [~] Pastikan projection parsial tidak membuat decoder/cursor desinkron. — `decodeRecord()` sekarang membaca satu record penuh; projection query masih perlu diuji.
 - [x] `decodeRecord()` mengembalikan record terstruktur dan ukuran record yang dikonsumsi.
 - [x] NULL bitmap dibaca berdasarkan nullable column dan digunakan saat decode.
 - [x] `NextOffset` dibaca/ditulis sebagai pointer logical-next di dalam leaf.
-- [ ] Validasi magic number dan file version ketika tabel dibuka.
+- [x] Validasi magic number dan file version ketika tabel dibuka.
 - [~] Boundary page sudah dicek saat insert (`recordEnd <= PageSize`); batas maksimum record/VARCHAR formal masih perlu dirapikan.
-- [ ] Tambahkan automated encode/decode round-trip test untuk seluruh tipe data, NULL, empty string, dan nilai batas.
-- [ ] Tambahkan test insert depan, tengah, belakang, duplicate PK, dan persistence.
+- [x] Tambahkan automated encode/decode round-trip test untuk seluruh tipe data, NULL, empty string, dan nilai batas.
+- [x] Tambahkan test insert depan, tengah, belakang, duplicate PK, dan persistence.
 
 ### Parser dan catalog primary key
 
 - [x] Tambahkan keyword `primary` dan `key`.
 - [x] Parser menerima bentuk awal: `CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR)`.
 - [x] Metadata kolom menyimpan flag primary key (`ColumnDef.Primary`).
-- [~] Primary key lebih dari satu sudah ditolak; nullable/non-int perlu dipastikan ditolak saat `CREATE TABLE`, bukan baru saat insert.
+- [x] Primary key lebih dari satu sudah ditolak; 
 - [~] Catalog sudah menyimpan flag primary pada kolom; format version tabel belum ada.
 
 ### Page dan file layout

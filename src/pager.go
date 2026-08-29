@@ -8,7 +8,7 @@ import (
 
 const PageSize uint16 = 4096 // 4 KB
 
-const IndexPageHeaderSize = 25 // byte
+const IndexPageHeaderSize uint16 = 25 // byte
 
 type PageID uint32
 

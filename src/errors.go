@@ -10,6 +10,7 @@ var (
 
 	ErrNoDatabaseSelected    = errors.New("no database selected")
 	ErrDatabaseNotFound      = errors.New("database not found")
+	ErrNotADatabaseFile      = errors.New("not a database file")
 	ErrDatabaseExists        = errors.New("database already exists")
 	ErrTableNotFound         = errors.New("table not found")
 	ErrTableExists           = errors.New("table already exists")

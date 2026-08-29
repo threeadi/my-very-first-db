@@ -150,7 +150,7 @@ func (x *Executor) CreateTable(stmt CreateTableStatement) error {
 		return errors.New("table harus memiliki minimal 1 PK")
 	}
 
-	filePath := filepath.Join(x.config.DataDirectory, fmt.Sprintf("/%s/%s.3tbl", stmt.DBName, stmt.Table))
+	filePath := filepath.Join(x.config.DataDirectory, stmt.DBName, fmt.Sprintf("%s.3tbl", stmt.Table))
 	pager, err := CreatePager(filePath)
 	if err != nil {
 		return err
@@ -363,7 +363,7 @@ func (x *Executor) Insert(stmt InsertStatement) error {
 		return err
 	}
 
-	if IndexPageHeaderSize+len(encodedRecord) > int(PageSize) {
+	if int(IndexPageHeaderSize)+len(encodedRecord) > int(PageSize) {
 		return ErrValueOutOfRange
 	}
 

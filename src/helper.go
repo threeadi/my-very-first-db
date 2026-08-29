@@ -453,7 +453,7 @@ func readInternalCells(page *Page) (firstChild PageID, cells []InternalCell, err
 
 	offset := IndexPageHeaderSize
 
-	if offset+4 > int(PageSize) {
+	if offset+4 > PageSize {
 		return 0, nil, ErrCorruptTableFile
 	}
 
@@ -466,7 +466,7 @@ func readInternalCells(page *Page) (firstChild PageID, cells []InternalCell, err
 
 	cells = make([]InternalCell, 0, head.RecordCount)
 	for i := 0; i < int(head.RecordCount); i++ {
-		if offset+8 > int(PageSize) {
+		if offset+8 > PageSize {
 			return 0, nil, ErrCorruptTableFile
 		}
 
@@ -495,7 +495,7 @@ func rewriteInternal(page *Page, firstChild PageID, cells []InternalCell) error 
 	if firstChild == 0 {
 		return ErrCorruptTableFile
 	}
-	requiredSize := IndexPageHeaderSize + 4 + (len(cells) * 8)
+	requiredSize := int(IndexPageHeaderSize) + 4 + (len(cells) * 8)
 
 	if requiredSize > int(PageSize) {
 		return ErrInternalPageFull
@@ -566,35 +566,38 @@ func readLeafRecords(
 		return nil, err
 	}
 
+	if head.PageType != PageTypeLeaf {
+		return nil, ErrCorruptTableFile
+	}
+
 	records := make([]LeafRecord, 0, head.RecordCount)
 	currentOffset := head.FirstRecordOffset
 
 	for currentOffset != 0 {
-		// 1. Decode record untuk mengetahui:
-		//    - nilai PK
-		//    - NextOffset
-		//    - ukuran record
-		record, _, nextOffset, recordSize, err := decodeRecord(
-			columns,
-			page.Data[currentOffset:],
-		)
+		if int(currentOffset) >= int(PageSize) {
+			return nil, ErrCorruptTableFile
+		}
+
+		record, _, nextOffset, recordSize, err := decodeRecord(columns, page.Data[currentOffset:])
 		if err != nil {
 			return nil, err
 		}
-		pk, ok := record[pkColIdx].Value.(int32)
+
+		if pkColIdx >= len(record) {
+			return nil, ErrCorruptTableFile
+		}
+
+		pkVal, ok := record[pkColIdx].Value.(int32)
 		if !ok {
 			return nil, ErrInvalidDataType
 		}
-		endRecord := int(currentOffset) + recordSize
-		if endRecord > int(PageSize) {
-			return nil, ErrCorruptTableFile
-		}
-		raw := make([]byte, recordSize)
-		copy(raw, page.Data[int(currentOffset):endRecord])
+
+		recordBytes := make([]byte, recordSize)
+		copy(recordBytes, page.Data[currentOffset:int(currentOffset)+recordSize])
 
 		records = append(records, LeafRecord{
-			PK:   pk,
-			Data: raw,
+			PK:   pkVal,
+			Data: recordBytes,
 		})
 
 		currentOffset = nextOffset
@@ -627,52 +630,53 @@ func rewriteLeaf(page *Page, records []LeafRecord, columns []ColumnDef) error {
 	if err != nil {
 		return err
 	}
+
+	if header.PageType != PageTypeLeaf {
+		return ErrCorruptTableFile
+	}
+
+	// Reset data page area
 	page.Data = [PageSize]byte{}
+
 	header.RecordCount = uint16(len(records))
 	header.FirstRecordOffset = 0
 	header.FreeStart = IndexPageHeaderSize
 
-	// Empty leaf valid.
 	if len(records) == 0 {
 		EncodeIndexPageHeader(page, header)
 		return nil
 	}
 
-	offsets := make([]uint16, len(records))
-	currentOffset := uint16(IndexPageHeaderSize)
-	for i, r := range records {
-		recordEnd := int(currentOffset) + len(r.Data)
+	var prevOffset uint16 = 0
+	currentFree := uint16(IndexPageHeaderSize)
+
+	for i, rec := range records {
+		var nextOffset uint16 = 0
+		if i == 0 {
+			header.FirstRecordOffset = currentFree
+		} else {
+			nextPos := int(prevOffset) + recordNextOffsetPosition(columns)
+			binary.LittleEndian.PutUint16(page.Data[nextPos:nextPos+2], currentFree)
+		}
+
+		recordEnd := int(currentFree) + len(rec.Data)
 		if recordEnd > int(PageSize) {
-			return errors.New("record tidak muat di leaf page")
+			return ErrValueOutOfRange
 		}
 
-		offsets[i] = currentOffset
-		currentOffset = uint16(recordEnd)
+		copy(page.Data[currentFree:recordEnd], rec.Data)
+
+		// Set NextOffset field di dalam record menjadi 0 terlebih dahulu
+		nextPos := int(currentFree) + recordNextOffsetPosition(columns)
+		binary.LittleEndian.PutUint16(page.Data[nextPos:nextPos+2], nextOffset)
+
+		prevOffset = currentFree
+		currentFree = uint16(recordEnd)
 	}
 
-	header.FirstRecordOffset = offsets[0]
-	nextOffsetPos := recordNextOffsetPosition(columns)
-
-	for i, r := range records {
-		rOffset := offsets[i]
-		recordEnd := int(rOffset) + len(r.Data)
-
-		copy(page.Data[rOffset:recordEnd], r.Data)
-
-		var nextOffset uint16
-
-		if i+1 < len(records) {
-			nextOffset = offsets[i+1]
-		}
-
-		pos := int(rOffset) + nextOffsetPos
-		binary.LittleEndian.PutUint16(
-			page.Data[pos:pos+2],
-			nextOffset,
-		)
-	}
-	header.FreeStart = currentOffset
+	header.FreeStart = currentFree
 	EncodeIndexPageHeader(page, header)
+
 	return nil
 }
 
@@ -707,6 +711,10 @@ func DecodeMetaPage(page *Page) (MetaPage, error) {
 	n := copy(meta.Magic[:], page.Data[0:4])
 	if n != 4 {
 		return meta, ErrPageReadFailed
+	}
+
+	if meta.Magic != [4]byte{'3', 'D', 'B', '1'} {
+		return meta, ErrNotADatabaseFile
 	}
 
 	_, err := binary.Decode(page.Data[4:5], binary.LittleEndian, &meta.Version)
@@ -792,51 +800,52 @@ func DecodeIndexPageHeader(page *Page) (IndexPageHeader, error) {
 	return h, nil
 }
 
-func recordNextOffsetPosition(cols []ColumnDef) int {
-	varcharCnt := 0
-	nullableCnt := 0
+func recordNextOffsetPosition(columns []ColumnDef) int {
+	var varcharCount int
+	var nullableCount int
 
-	for _, col := range cols {
+	for _, col := range columns {
 		if col.ValueType == VarcharType {
-			varcharCnt++
+			varcharCount++
 		}
 		if col.Nullable {
-			nullableCnt++
+			nullableCount++
 		}
 	}
-	varlenMetadataSize := varcharCnt * 2
-	nullBitmapSize := (nullableCnt + 7) / 8
-	flagSize := 1
 
-	return varlenMetadataSize + nullBitmapSize + flagSize
+	nullBitmapLen := (nullableCount + 7) / 8
+
+	return (varcharCount * 2) + nullBitmapLen + 1
 }
 
 func updateChildrenParentID(
 	pager *Pager,
-	parentPageID PageID,
+	parentID PageID,
 	firstChild PageID,
 	cells []InternalCell,
 ) error {
-	childIDs := []PageID{firstChild}
+	childIDs := make([]PageID, 0, len(cells)+1)
+	childIDs = append(childIDs, firstChild)
+
 	for _, cell := range cells {
 		childIDs = append(childIDs, cell.ChildPageID)
 	}
 
 	for _, childID := range childIDs {
-		child, err := pager.ReadPage(childID)
+		childPage, err := pager.ReadPage(childID)
 		if err != nil {
 			return err
 		}
 
-		header, err := DecodeIndexPageHeader(child)
+		childHead, err := DecodeIndexPageHeader(childPage)
 		if err != nil {
 			return err
 		}
 
-		header.ParentID = parentPageID
-		EncodeIndexPageHeader(child, header)
+		childHead.ParentID = parentID
+		EncodeIndexPageHeader(childPage, childHead)
 
-		if err := pager.WritePage(child); err != nil {
+		if err := pager.WritePage(childPage); err != nil {
 			return err
 		}
 	}

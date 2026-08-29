@@ -2,12 +2,15 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-playground/assert/v2"
 )
@@ -100,6 +103,85 @@ func createEmptyTree(path string) error {
 	}
 
 	return nil
+}
+
+func TestInsert(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Log("tempDir: ", tempDir)
+
+	config := &Config{
+		DataDirectory: tempDir + string(os.PathSeparator),
+		CatalogPath: filepath.Join(
+			tempDir,
+			"catalog.json",
+		),
+	}
+
+	catalog := NewCatalog()
+	executor := NewExecutor(config, catalog)
+	defer func() {
+		executor.Close()
+	}()
+
+	err := executor.CreateDatabase(
+		CreateDatabaseStatement{
+			DBName: "testdb",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = executor.CreateTable(
+		CreateTableStatement{
+			DBName: "testdb",
+			Table:  "users",
+			Columns: []ColumnDef{
+				{
+					Name:      "id",
+					ValueType: IntType,
+					Primary:   true,
+				},
+				{
+					Name:      "name",
+					ValueType: VarcharType,
+				},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = executor.Insert(
+		InsertStatement{
+			DBName: "testdb",
+			Table:  "users",
+			Values: []string{
+				"1",
+				"value",
+			},
+		},
+	)
+
+	if err != nil {
+		t.Fatalf("insert 1 failed: %v", err)
+	}
+
+	err = executor.Insert(
+		InsertStatement{
+			DBName: "testdb",
+			Table:  "users",
+			Values: []string{
+				"1.123",
+				"false",
+			},
+		},
+	)
+
+	if !errors.Is(err, ErrInvalidDataType) {
+		t.Fatalf("expected ErrInvalidDataType, got: %v", err)
+	}
 }
 
 func TestInsertSingleLeafOrdered(t *testing.T) {
@@ -912,6 +994,239 @@ func TestRestartInsertAndSelect(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Log("the tree is valid")
+}
+
+func TestFuzzyInsertRandomOrder(t *testing.T) {
+	sizes := []int{50, 500, 2500}
+
+	for _, n := range sizes {
+		n := n
+		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
+			seed := time.Now().UnixNano()
+			t.Logf("seed: %d (n=%d)", seed, n)
+			rng := rand.New(rand.NewSource(seed))
+
+			tempDir := t.TempDir()
+			config := &Config{
+				DataDirectory: tempDir + string(os.PathSeparator),
+				CatalogPath:   filepath.Join(tempDir, "catalog.json"),
+			}
+
+			catalog := NewCatalog()
+			executor := NewExecutor(config, catalog)
+			defer executor.Close()
+
+			if err := executor.CreateDatabase(CreateDatabaseStatement{
+				DBName: "testdb",
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := executor.CreateTable(CreateTableStatement{
+				DBName: "testdb",
+				Table:  "users",
+				Columns: []ColumnDef{
+					{Name: "id", ValueType: IntType, Primary: true, Nullable: false},
+					{Name: "name", ValueType: VarcharType, Nullable: false},
+				},
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			// PK 1..n, lalu diacak urutannya sebelum di-insert.
+			ids := make([]int, n)
+			for i := range ids {
+				ids[i] = i + 1
+			}
+			rng.Shuffle(len(ids), func(i, j int) {
+				ids[i], ids[j] = ids[j], ids[i]
+			})
+
+			largeValue := createLargeString()
+			for _, id := range ids {
+				err := executor.Insert(InsertStatement{
+					DBName: "testdb",
+					Table:  "users",
+					Values: []string{
+						strconv.Itoa(id),
+						largeValue,
+					},
+				})
+				if err != nil {
+					t.Fatalf("insert id=%d gagal (seed=%d): %v", id, seed, err)
+				}
+			}
+
+			cols, err := catalog.GetTableColumns("testdb", "users")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			pager, err := OpenPager(filepath.Join(config.DataDirectory, "testdb", "users.3tbl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pager.Close()
+
+			if err := ValidateTree(pager, cols, 0); err != nil {
+				t.Fatalf("tree tidak valid setelah fuzzy insert (seed=%d): %v", seed, err)
+			}
+
+			res, err := executor.Select(SelectStatement{
+				DBName:  "testdb",
+				Table:   "users",
+				Columns: []string{"*"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			assert.Equal(t, n, len(res.Records))
+
+			// Inti test: walau insert diacak total, hasil scan HARUS ascending
+			// 1..n tanpa lubang maupun duplikat.
+			seen := make(map[int32]bool, n)
+			for i, rec := range res.Records {
+				pk, ok := rec[0].Value.(int32)
+				if !ok {
+					t.Fatalf("record %d: PK value bukan int32: %v", i, rec[0].Value)
+				}
+
+				wantPK := int32(i + 1)
+				if pk != wantPK {
+					t.Fatalf(
+						"urutan hasil scan salah pada index %d (seed=%d): got PK=%d, want PK=%d",
+						i, seed, pk, wantPK,
+					)
+				}
+
+				if seen[pk] {
+					t.Fatalf("duplicate PK %d ditemukan di hasil scan (seed=%d)", pk, seed)
+				}
+				seen[pk] = true
+			}
+
+			if len(seen) != n {
+				t.Fatalf("jumlah PK unik di hasil scan = %d, want %d (seed=%d)", len(seen), n, seed)
+			}
+		})
+	}
+}
+
+// TestFuzzyInsertRandomOrderWithDuplicates sama seperti di atas, tapi setiap
+// PK dicoba di-insert dua kali dan seluruh urutan percobaan (bukan cuma
+// urutan PK unik-nya) diacak total. Ini memastikan:
+//   - Insert pertama untuk suatu PK selalu sukses, terlepas kapan giliran
+//     PK itu muncul di urutan acak.
+//   - Insert kedua untuk PK yang sama selalu ditolak duplicate, bahkan kalau
+//     percobaan kedua itu "menyelip" jauh sebelum/sesudah PK lain di-insert.
+//   - Tree tetap valid dan hasil scan tetap ascending sekalipun sebagian
+//     besar operasi insert di tengah jalan gagal (bukan sukses semua).
+func TestFuzzyInsertRandomOrderWithDuplicates(t *testing.T) {
+	const n = 300
+
+	seed := time.Now().UnixNano()
+	t.Logf("seed: %d", seed)
+	rng := rand.New(rand.NewSource(seed))
+
+	tempDir := t.TempDir()
+	config := &Config{
+		DataDirectory: tempDir + string(os.PathSeparator),
+		CatalogPath:   filepath.Join(tempDir, "catalog.json"),
+	}
+
+	catalog := NewCatalog()
+	executor := NewExecutor(config, catalog)
+	defer executor.Close()
+
+	if err := executor.CreateDatabase(CreateDatabaseStatement{
+		DBName: "testdb",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := executor.CreateTable(CreateTableStatement{
+		DBName: "testdb",
+		Table:  "users",
+		Columns: []ColumnDef{
+			{Name: "id", ValueType: IntType, Primary: true, Nullable: false},
+			{Name: "name", ValueType: VarcharType, Nullable: false},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Setiap id 1..n muncul dua kali di daftar percobaan, lalu diacak total.
+	attempts := make([]int, 0, n*2)
+	for i := 1; i <= n; i++ {
+		attempts = append(attempts, i, i)
+	}
+	rng.Shuffle(len(attempts), func(i, j int) {
+		attempts[i], attempts[j] = attempts[j], attempts[i]
+	})
+
+	largeValue := createLargeString()
+	inserted := make(map[int]bool, n)
+
+	for _, id := range attempts {
+		err := executor.Insert(InsertStatement{
+			DBName: "testdb",
+			Table:  "users",
+			Values: []string{
+				strconv.Itoa(id),
+				largeValue,
+			},
+		})
+
+		if !inserted[id] {
+			if err != nil {
+				t.Fatalf("percobaan pertama insert id=%d gagal (seed=%d): %v", id, seed, err)
+			}
+			inserted[id] = true
+			continue
+		}
+
+		if err == nil {
+			t.Fatalf("percobaan kedua insert id=%d seharusnya ditolak duplicate PK (seed=%d)", id, seed)
+		}
+	}
+
+	cols, err := catalog.GetTableColumns("testdb", "users")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pager, err := OpenPager(filepath.Join(config.DataDirectory, "testdb", "users.3tbl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pager.Close()
+
+	if err := ValidateTree(pager, cols, 0); err != nil {
+		t.Fatalf("tree tidak valid setelah fuzzy insert+duplicate (seed=%d): %v", seed, err)
+	}
+
+	res, err := executor.Select(SelectStatement{
+		DBName:  "testdb",
+		Table:   "users",
+		Columns: []string{"*"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assert.Equal(t, n, len(res.Records))
+
+	for i, rec := range res.Records {
+		pk, ok := rec[0].Value.(int32)
+		if !ok {
+			t.Fatalf("record %d: PK bukan int32", i)
+		}
+		wantPK := int32(i + 1)
+		if pk != wantPK {
+			t.Fatalf("urutan salah di index %d (seed=%d): got %d, want %d", i, seed, pk, wantPK)
+		}
+	}
 }
 
 func createLargeString() string {
