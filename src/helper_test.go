@@ -6,76 +6,6 @@ import (
 	"testing"
 )
 
-// ---------------------------------------------------------------------------
-// Konstanta identitas file.
-//
-// ExpectedMagic  : penanda "file ini dibuat oleh engine ini". Ditulis sekali
-//
-//	saat CREATE TABLE/DATABASE, tidak pernah berubah setelahnya
-//	kecuali kamu sengaja mengganti identitas format total.
-//
-// CurrentVersion : versi layout biner yang dipahami oleh binary yang sedang
-//
-//	jalan. Naikkan HANYA saat layout MetaPage/IndexPageHeader/
-//	record berubah sehingga file lama tidak bisa dibaca lurus
-//	oleh kode baru tanpa migrasi.
-//
-// ---------------------------------------------------------------------------
-var ExpectedMagic = [4]byte{'R', 'D', 'B', '1'}
-
-const CurrentVersion uint8 = 1
-
-// Sentinel errors baru. Kalau nama-nama ini sudah ada di errors.go kamu,
-// hapus deklarasi di sini supaya tidak duplicate declaration.
-var (
-	ErrInvalidMagicNumber = errors.New("invalid magic number: file bukan database yang dikenali")
-	ErrUnsupportedVersion = errors.New("unsupported file version")
-	ErrPageSizeMismatch   = errors.New("page size pada meta page tidak cocok dengan konfigurasi engine")
-)
-
-// NewMetaPage membangun MetaPage baru dengan magic number dan version yang
-// benar secara otomatis, supaya pemanggil (mis. saat CREATE TABLE) tidak
-// perlu—dan tidak bisa—salah isi Magic/Version secara manual.
-func NewMetaPage(rootPageID PageID, nextPageID PageID) MetaPage {
-	return MetaPage{
-		Magic:      ExpectedMagic,
-		Version:    CurrentVersion,
-		PageSize:   uint16(PageSize),
-		RootPageID: rootPageID,
-		NextPageID: nextPageID,
-	}
-}
-
-// DecodeMetaPageStrict adalah versi DecodeMetaPage yang menolak file dengan
-// magic number, version, atau page size yang tidak dikenali. Gunakan ini di
-// jalur "open table/database", bukan di jalur internal yang sudah tahu page
-// itu valid.
-//
-// Kalau kamu lebih suka menyatukan validasi ini langsung ke dalam
-// DecodeMetaPage yang sudah ada (disarankan, supaya tidak ada jalur baca
-// meta page yang lupa validasi), tinggal tempel blok validasi di bawah ini
-// persis setelah masing-masing field selesai di-decode.
-func DecodeMetaPageStrict(page *Page) (MetaPage, error) {
-	meta, err := DecodeMetaPage(page)
-	if err != nil {
-		return meta, err
-	}
-
-	if meta.Magic != ExpectedMagic {
-		return meta, ErrInvalidMagicNumber
-	}
-
-	if meta.Version != CurrentVersion {
-		return meta, ErrUnsupportedVersion
-	}
-
-	if meta.PageSize != uint16(PageSize) {
-		return meta, ErrPageSizeMismatch
-	}
-
-	return meta, nil
-}
-
 func TestEncodeDecodeRecord_RoundTrip(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -196,7 +126,7 @@ func TestEncodeDecodeRecord_RoundTrip(t *testing.T) {
 				t.Fatalf("encodeRecord failed: %v", err)
 			}
 
-			decoded, _, gotNextOff, recordSize, err := decodeRecord(tc.columns, encoded)
+			decoded, _, gotNextOff, recordSize, err := decodeRecord(tc.columns, encoded, nil)
 			if err != nil {
 				t.Fatalf("decodeRecord failed: %v", err)
 			}
@@ -306,7 +236,7 @@ func TestDecodeRecord_TruncatedData(t *testing.T) {
 	// Potong byte terakhir supaya field IntType tidak lengkap.
 	truncated := encoded[:len(encoded)-1]
 
-	_, _, _, _, err = decodeRecord(columns, truncated)
+	_, _, _, _, err = decodeRecord(columns, truncated, nil)
 	if err == nil {
 		t.Fatal("expected error decoding truncated record, got nil")
 	}

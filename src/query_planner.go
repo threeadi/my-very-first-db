@@ -1,6 +1,9 @@
 package main
 
-import "strconv"
+import (
+	"fmt"
+	"strconv"
+)
 
 type AccessMethod int
 
@@ -58,7 +61,64 @@ func primaryKeyColumn(columns []ColumnDef) (name string, idx int) {
 	return "", -1
 }
 
-func pointLookupPK(leaf *Page, columns []ColumnDef, pkColIdx int, key int32, criteria *WhereClause) ([]Record, error) {
+// neededColumnsMask menentukan kolom mana yang harus benar-benar
+// dimaterialisasi decodeRecord untuk satu SELECT -- gabungan dari
+// kolom yang diminta SELECT, kolom yang dipakai WHERE (termasuk seluruh
+// chain AND/OR lewat markWhereColumns), dan kolom PK (selalu ditandai,
+// karena algoritma internal seperti early-stop di pointLookupPK/
+// rangeScanPKForward dan urutan hasil bergantung padanya).
+//
+// Balik nil kalau semua kolom dibutuhkan (SELECT * dan tidak ada yang bisa
+// dipangkas) -- nil punya arti khusus di decodeRecord: "materialize
+// semua kolom", supaya jalur tanpa proyeksi tetap sama persis seperti
+// sebelum fitur ini ada.
+func neededColumnsMask(columns []ColumnDef, stmt SelectStatement, pkColIdx int) []bool {
+	for _, c := range stmt.Columns {
+		if c == "*" {
+			return nil
+		}
+	}
+
+	colIndex := make(map[string]int, len(columns))
+	for i, col := range columns {
+		colIndex[col.Name] = i
+	}
+
+	mask := make([]bool, len(columns))
+
+	for _, name := range stmt.Columns {
+		if idx, ok := colIndex[name]; ok {
+			mask[idx] = true
+			fmt.Println("masked column", name, "at index", idx)
+		}
+	}
+
+	markWhereColumns(mask, colIndex, stmt.Criteria)
+
+	if pkColIdx >= 0 {
+		mask[pkColIdx] = true
+	}
+
+	return mask
+}
+
+// markWhereColumns menandai kolom mana pun yang muncul di wc atau seluruh
+// chain AND/OR di wc.Condition -- rekursif, pola yang sama dengan
+// evaluateWhereClause, supaya kolom yang dipakai untuk filter tetap
+// didekode walau tidak ikut ditampilkan di SELECT.
+func markWhereColumns(mask []bool, colIndex map[string]int, wc *WhereClause) {
+	if wc == nil {
+		return
+	}
+	if idx, ok := colIndex[wc.Key]; ok {
+		mask[idx] = true
+	}
+	for _, next := range wc.Criteria {
+		markWhereColumns(mask, colIndex, next)
+	}
+}
+
+func pointLookupPK(leaf *Page, columns []ColumnDef, pkColIdx int, key int32, criteria *WhereClause, needed []bool) ([]Record, error) {
 	head, err := DecodeIndexPageHeader(leaf)
 	if err != nil {
 		return nil, err
@@ -69,7 +129,7 @@ func pointLookupPK(leaf *Page, columns []ColumnDef, pkColIdx int, key int32, cri
 
 	offset := head.FirstRecordOffset
 	for offset != 0 {
-		record, _, nextOffset, _, err := decodeRecord(columns, leaf.Data[offset:])
+		record, _, nextOffset, _, err := decodeRecord(columns, leaf.Data[offset:], needed)
 		if err != nil {
 			return nil, err
 		}
@@ -101,7 +161,7 @@ func pointLookupPK(leaf *Page, columns []ColumnDef, pkColIdx int, key int32, cri
 	return nil, nil
 }
 
-func rangeScanPKForward(pager *Pager, startLeaf *Page, columns []ColumnDef, criteria *WhereClause) ([]Record, error) {
+func rangeScanPKForward(pager *Pager, startLeaf *Page, columns []ColumnDef, criteria *WhereClause, needed []bool) ([]Record, error) {
 	var records []Record
 	matchedOnce := false
 	leaf := startLeaf
@@ -117,7 +177,7 @@ func rangeScanPKForward(pager *Pager, startLeaf *Page, columns []ColumnDef, crit
 
 		offset := head.FirstRecordOffset
 		for offset != 0 {
-			record, _, nextOffset, _, err := decodeRecord(columns, leaf.Data[offset:])
+			record, _, nextOffset, _, err := decodeRecord(columns, leaf.Data[offset:], needed)
 			if err != nil {
 				return nil, err
 			}

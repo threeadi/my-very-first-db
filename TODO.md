@@ -157,7 +157,7 @@ Storage dasar sekarang sudah memakai page tetap 4096 byte dan menjadi fondasi cl
 - [x] Dapat membaca kembali record dari disk menggunakan schema tabel.
 - [x] Dapat scan seluruh record pada satu leaf melalui `FirstRecordOffset` dan `NextOffset`.
 - [x] Persistence manual: row tetap identik setelah program ditutup dan dibuka kembali.
-- [x] Validasi magic number, version, page type, dan boundary record secara ketat saat read/open.
+- [ ] Validasi magic number, version, page type, dan boundary record secara ketat saat read/open.
 - [ ] Tambahkan automated round-trip/restart test untuk seluruh tipe data dan NULL.
 - [ ] Tombstone/delete-mark belum dipakai oleh DELETE.
 
@@ -181,16 +181,18 @@ Target ini sengaja ditempatkan setelah storage dasar karena clustered tree **ada
 
 ### Blocker / hardening sebelum split
 
-- [x] Perbaiki lexer agar trailing whitespace tidak mengakses index di luar string.
-- [x] Tambahkan token terminator `;` atau secara eksplisit strip terminator sebelum tokenize.
+- [ ] Perbaiki lexer agar trailing whitespace tidak mengakses index di luar string.
+- [ ] Tambahkan token terminator `;` atau secara eksplisit strip terminator sebelum tokenize.
 - [~] Pastikan projection parsial tidak membuat decoder/cursor desinkron. — `decodeRecord()` sekarang membaca satu record penuh; projection query masih perlu diuji.
 - [x] `decodeRecord()` mengembalikan record terstruktur dan ukuran record yang dikonsumsi.
+- [x] Projection parsial menggunakan `neededColumnsMask` / `isNeeded` saat decode; field yang tidak diperlukan cukup dilewati secara inline tanpa membuat `Value`.
+- [x] Helper `skipValue()` dihapus karena tidak diperlukan; traversal antar-record tetap menggunakan `NextOffset`, sedangkan skip field dilakukan inline di `decodeRecord()`.
 - [x] NULL bitmap dibaca berdasarkan nullable column dan digunakan saat decode.
 - [x] `NextOffset` dibaca/ditulis sebagai pointer logical-next di dalam leaf.
-- [x] Validasi magic number dan file version ketika tabel dibuka.
+- [ ] Validasi magic number dan file version ketika tabel dibuka.
 - [~] Boundary page sudah dicek saat insert (`recordEnd <= PageSize`); batas maksimum record/VARCHAR formal masih perlu dirapikan.
-- [x] Tambahkan automated encode/decode round-trip test untuk seluruh tipe data, NULL, empty string, dan nilai batas.
-- [x] Tambahkan test insert depan, tengah, belakang, duplicate PK, dan persistence.
+- [ ] Tambahkan automated encode/decode round-trip test untuk seluruh tipe data, NULL, empty string, dan nilai batas.
+- [ ] Tambahkan test insert depan, tengah, belakang, duplicate PK, dan persistence.
 
 ### Parser dan catalog primary key
 

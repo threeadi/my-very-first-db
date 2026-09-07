@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"sort"
 	"strconv"
@@ -213,11 +212,31 @@ func encodeRecord(columns []ColumnDef, values []ParsedValue, nextOff uint16) ([]
 	return buf.Bytes(), nil
 }
 
-func decodeRecord(columns []ColumnDef, data []byte) (record Record, flag uint8, nextOffset uint16, recordSize int, err error) {
+// Kolom VARCHAR yang tidak dibutuhkan tetap "dilewati" dengan benar (offset
+// tetap maju pakai panjang yang sudah dibaca dari metadata di awal), tapi
+// TIDAK PERNAH di-copy jadi Go string -- itu bagian termahal (alokasi +
+// memcpy) yang dihindari. Kolom INT/FLOAT/BOOLEAN yang tidak dibutuhkan
+// juga tidak diassign ke Value (menghindari boxing ke `any`), meski
+// penghematannya jauh lebih kecil dibanding VARCHAR.
+//
+// Kolom yang di-skip tetap punya slot di Record (di index yang sama, supaya
+// record[idx] tidak pernah out-of-range untuk kolom manapun), tapi isinya
+// Value{} kosong. Pemanggil TIDAK BOLEH membaca nilai kolom yang tidak
+// ditandai true di needed -- itu tanggung jawab pemanggil untuk hanya minta
+// proyeksi yang benar-benar tidak ia butuhkan sama sekali (SELECT, WHERE,
+// dan kolom PK).
+func decodeRecord(columns []ColumnDef, data []byte, needed []bool) (record Record, flag uint8, nextOffset uint16, recordSize int, err error) {
 	offset := 0
 
+	isNeeded := func(idx int) bool {
+		return needed == nil || (idx < len(needed) && needed[idx])
+	}
+
 	// -----------------------------------------
-	// 1. Baca metadata panjang VARCHAR
+	// 1. Baca metadata panjang VARCHAR -- SELALU dibaca penuh untuk semua
+	// kolom varchar (dibutuhkan atau tidak), karena posisi byte kolom-kolom
+	// SESUDAHNYA bergantung pada angka ini. Ini murah (2 byte per kolom,
+	// tanpa alokasi) -- yang mahal cuma materialize string-nya nanti.
 	// -----------------------------------------
 	varcharLengths := make(map[int]uint16)
 	for colIdx, col := range columns {
@@ -275,11 +294,16 @@ func decodeRecord(columns []ColumnDef, data []byte) (record Record, flag uint8, 
 			isNull = isNullBitSet(nullBitmap, nullableIdx)
 			nullableIdx++
 		}
+
+		want := isNeeded(colIdx)
+
 		if isNull {
-			record[colIdx] = Value{
-				Type:  col.ValueType,
-				Null:  true,
-				Value: nil,
+			if want {
+				record[colIdx] = Value{
+					Type:  col.ValueType,
+					Null:  true,
+					Value: nil,
+				}
 			}
 			continue
 		}
@@ -289,23 +313,26 @@ func decodeRecord(columns []ColumnDef, data []byte) (record Record, flag uint8, 
 				return nil, 0, 0, 0, ErrInvalidValue
 			}
 
-			value := int32(binary.LittleEndian.Uint32(data[offset : offset+4]))
-
-			record[colIdx] = Value{
-				Type:  IntType,
-				Value: value,
-				Null:  false,
+			if want {
+				value := int32(binary.LittleEndian.Uint32(data[offset : offset+4]))
+				record[colIdx] = Value{
+					Type:  IntType,
+					Value: value,
+					Null:  false,
+				}
 			}
 			offset += 4
 		case FloatType:
 			if offset+4 > len(data) {
 				return nil, 0, 0, 0, ErrInvalidValue
 			}
-			raw := binary.LittleEndian.Uint32(data[offset : offset+4])
-			record[colIdx] = Value{
-				Type:  FloatType,
-				Value: math.Float32frombits(raw),
-				Null:  false,
+			if want {
+				raw := binary.LittleEndian.Uint32(data[offset : offset+4])
+				record[colIdx] = Value{
+					Type:  FloatType,
+					Value: math.Float32frombits(raw),
+					Null:  false,
+				}
 			}
 			offset += 4
 
@@ -317,10 +344,12 @@ func decodeRecord(columns []ColumnDef, data []byte) (record Record, flag uint8, 
 				)
 			}
 
-			record[colIdx] = Value{
-				Type:  BooleanType,
-				Value: data[offset] != 0,
-				Null:  false,
+			if want {
+				record[colIdx] = Value{
+					Type:  BooleanType,
+					Value: data[offset] != 0,
+					Null:  false,
+				}
 			}
 			offset++
 		case VarcharType:
@@ -328,10 +357,15 @@ func decodeRecord(columns []ColumnDef, data []byte) (record Record, flag uint8, 
 			if offset+length > len(data) {
 				return nil, 0, 0, 0, ErrInvalidValue
 			}
-			record[colIdx] = Value{
-				Type:  VarcharType,
-				Value: string(data[offset : offset+length]),
-				Null:  false,
+			if want {
+				// Satu-satunya baris yang benar-benar mahal (alokasi +
+				// memcpy) di seluruh fungsi ini -- inilah yang dihindari
+				// kalau kolom tidak dibutuhkan.
+				record[colIdx] = Value{
+					Type:  VarcharType,
+					Value: string(data[offset : offset+length]),
+					Null:  false,
+				}
 			}
 			offset += length
 		default:
@@ -342,89 +376,6 @@ func decodeRecord(columns []ColumnDef, data []byte) (record Record, flag uint8, 
 		}
 	}
 	return record, flags, nextOffset, offset, nil
-}
-
-func skipValue(r io.ReadSeeker, col ColumnDef) error {
-	fmt.Println("skipValue called", col)
-	switch col.ValueType {
-	case IntType, FloatType:
-		_, err := r.Seek(4, io.SeekCurrent)
-		return err
-	case BooleanType:
-		_, err := r.Seek(1, io.SeekCurrent)
-		return err
-	case VarcharType:
-		var length uint32
-		if err := binary.Read(r, binary.LittleEndian, &length); err != nil {
-			return err
-		}
-		if length > MAX_STRING_LENGTH {
-			return ErrStringTooLong
-		}
-		_, err := r.Seek(int64(length), io.SeekCurrent)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func decodeValue(r io.Reader, col ColumnDef) (Value, error) {
-	switch col.ValueType {
-	case IntType:
-		var value int32
-		err := binary.Read(r, binary.LittleEndian, &value)
-		if err != nil {
-			return Value{}, err
-		}
-
-		return Value{Type: IntType, Value: value, Null: false}, nil
-	case FloatType:
-		var value float32
-		err := binary.Read(r, binary.LittleEndian, &value)
-		if err != nil {
-			return Value{}, err
-		}
-
-		return Value{Type: FloatType, Value: value, Null: false}, nil
-	case BooleanType:
-		var raw uint8
-
-		err := binary.Read(r, binary.LittleEndian, &raw)
-		if err != nil {
-			return Value{}, err
-		}
-
-		if raw != 0 && raw != 1 {
-			return Value{}, ErrInvalidValue
-		}
-
-		return Value{Type: BooleanType, Value: raw == 1, Null: false}, nil
-	case VarcharType:
-		var length uint32
-		err := binary.Read(r, binary.LittleEndian, &length)
-		if err != nil {
-			return Value{}, err
-		}
-
-		if length > MAX_STRING_LENGTH {
-			return Value{}, ErrStringTooLong
-		}
-
-		var raw []byte = make([]byte, int(length))
-		_, err = io.ReadFull(r, raw)
-
-		if err != nil {
-			return Value{}, err
-		}
-		return Value{
-			Type:  VarcharType,
-			Value: string(raw),
-			Null:  false,
-		}, nil
-	default:
-		return Value{}, fmt.Errorf("%w: tipe kolom: %s pada %s", ErrInvalidDataType, col.ValueType, col.Name)
-	}
 }
 
 func setNullBit(bitmap []byte, nullIdx int) {
@@ -578,7 +529,7 @@ func readLeafRecords(
 			return nil, ErrCorruptTableFile
 		}
 
-		record, _, nextOffset, recordSize, err := decodeRecord(columns, page.Data[currentOffset:])
+		record, _, nextOffset, recordSize, err := decodeRecord(columns, page.Data[currentOffset:], nil)
 		if err != nil {
 			return nil, err
 		}

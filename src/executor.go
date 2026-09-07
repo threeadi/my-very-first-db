@@ -339,7 +339,7 @@ func (x *Executor) Insert(stmt InsertStatement) error {
 	var prevOffset uint16
 	currentOffset := head.FirstRecordOffset
 	for currentOffset != 0 {
-		record, _, nextOffset, _, err := decodeRecord(columns, page.Data[currentOffset:])
+		record, _, nextOffset, _, err := decodeRecord(columns, page.Data[currentOffset:], nil)
 		if err != nil {
 			return err
 		}
@@ -461,6 +461,13 @@ func (x *Executor) Select(stmt SelectStatement) (ResultSet, error) {
 	pkColumn, pkColIdx := primaryKeyColumn(columns)
 	plan := planQuery(stmt.Criteria, pkColumn)
 
+	// Column pruning / projection pushdown: kolom yang tidak dipakai di
+	// SELECT, WHERE, atau bukan PK, tidak akan dimaterialisasi sama sekali
+	// oleh decodeRecordProjected -- hemat alokasi + memcpy, terutama untuk
+	// VARCHAR besar yang tidak dibutuhkan. Ini TIDAK mengurangi I/O (page
+	// tetap dibaca utuh), cuma kerja CPU/memory saat parsing row.
+	needed := neededColumnsMask(columns, stmt, pkColIdx)
+
 	var records []Record
 	switch plan.Method {
 	case AccessPKPointLookup:
@@ -468,7 +475,7 @@ func (x *Executor) Select(stmt SelectStatement) (ResultSet, error) {
 		if err != nil {
 			return ResultSet{}, err
 		}
-		records, err = pointLookupPK(leaf, columns, pkColIdx, plan.Key, plan.Criteria)
+		records, err = pointLookupPK(leaf, columns, pkColIdx, plan.Key, plan.Criteria, needed)
 		if err != nil {
 			return ResultSet{}, err
 		}
@@ -478,13 +485,13 @@ func (x *Executor) Select(stmt SelectStatement) (ResultSet, error) {
 		if err != nil {
 			return ResultSet{}, err
 		}
-		records, err = rangeScanPKForward(pager, startLeaf, columns, plan.Criteria)
+		records, err = rangeScanPKForward(pager, startLeaf, columns, plan.Criteria, needed)
 		if err != nil {
 			return ResultSet{}, err
 		}
 
 	default: // AccessFullScan
-		records, err = scanTree(pager, rootPage, columns, plan.Criteria)
+		records, err = scanTree(pager, rootPage, columns, plan.Criteria, needed)
 		if err != nil {
 			return ResultSet{}, err
 		}
@@ -495,7 +502,7 @@ func (x *Executor) Select(stmt SelectStatement) (ResultSet, error) {
 	return resultSet, nil
 }
 
-func scanTree(pager *Pager, page *Page, columns []ColumnDef, wc *WhereClause) ([]Record, error) {
+func scanTree(pager *Pager, page *Page, columns []ColumnDef, wc *WhereClause, needed []bool) ([]Record, error) {
 	head, err := DecodeIndexPageHeader(page)
 	if err != nil {
 		return nil, err
@@ -503,7 +510,7 @@ func scanTree(pager *Pager, page *Page, columns []ColumnDef, wc *WhereClause) ([
 
 	switch head.PageType {
 	case PageTypeLeaf:
-		return scanLeafChain(pager, page, columns, wc)
+		return scanLeafChain(pager, page, columns, wc, needed)
 
 	case PageTypeInternal:
 		firstPageID, _, err := readInternalCells(page)
@@ -516,14 +523,16 @@ func scanTree(pager *Pager, page *Page, columns []ColumnDef, wc *WhereClause) ([
 			return nil, err
 		}
 
-		return scanTree(pager, firstPage, columns, wc)
+		return scanTree(pager, firstPage, columns, wc, needed)
 
 	default:
 		return nil, ErrCorruptTableFile
 	}
 }
 
-func scanLeaf(page *Page, columns []ColumnDef, wc *WhereClause) ([]Record, error) {
+// scanLeaf mendecode tiap record lewat decodeRecordProjected -- kolom yang
+// tidak ditandai di needed tidak pernah dimaterialisasi, cuma dilewati.
+func scanLeaf(page *Page, columns []ColumnDef, wc *WhereClause, needed []bool) ([]Record, error) {
 	rootHead, err := DecodeIndexPageHeader(page)
 	if err != nil {
 		return nil, err
@@ -533,7 +542,7 @@ func scanLeaf(page *Page, columns []ColumnDef, wc *WhereClause) ([]Record, error
 	var records []Record
 
 	for recordOffset != 0 {
-		record, _, nextOffset, _, err := decodeRecord(columns, page.Data[recordOffset:])
+		record, _, nextOffset, _, err := decodeRecord(columns, page.Data[recordOffset:], needed)
 		if err != nil {
 			return nil, err
 		}
@@ -557,6 +566,7 @@ func scanLeafChain(
 	page *Page,
 	columns []ColumnDef,
 	wc *WhereClause,
+	needed []bool,
 ) ([]Record, error) {
 	var records []Record
 
@@ -570,7 +580,7 @@ func scanLeafChain(
 			return nil, ErrCorruptTableFile
 		}
 
-		result, err := scanLeaf(page, columns, wc)
+		result, err := scanLeaf(page, columns, wc, needed)
 		if err != nil {
 			return nil, err
 		}

@@ -28,4 +28,8 @@ var (
 	ErrPageWriteFailed  = errors.New("failed to write page")
 	ErrInternalPageFull = errors.New("internal page is full")
 	ErrPageReadFailed   = errors.New("failed to read page")
+
+	ErrInvalidMagicNumber = errors.New("invalid magic number: file bukan database yang dikenali")
+	ErrUnsupportedVersion = errors.New("unsupported file version")
+	ErrPageSizeMismatch   = errors.New("page size pada meta page tidak cocok dengan konfigurasi engine")
 )
