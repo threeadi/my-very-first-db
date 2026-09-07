@@ -66,11 +66,11 @@ type CreateTableStatement struct {
 func (CreateTableStatement) statementNode() {}
 
 type SelectStatement struct {
-	DBName  string
-	Table   string
-	Columns []string
-	Cons    *WhereClause
-	Sort    Sort
+	DBName   string
+	Table    string
+	Columns  []string
+	Criteria *WhereClause
+	Sort     Sort
 }
 
 type CompareOp int
@@ -385,18 +385,18 @@ func (p *Parser) parseSelect() (Statement, error) {
 
 	if p.pos < len(p.Tokens) && p.Tokens[p.pos].Type == KEYWORD && p.Tokens[p.pos].Literal == "where" {
 		p.pos++
-		cond, err := p.parseWhere()
+		criteria, err := p.parseWhere()
 		if err != nil {
 			return nil, err
 		}
-		stmt.Cons = cond
+		stmt.Criteria = criteria
 	}
 
 	return stmt, nil
 }
 
 func (p *Parser) parseWhere() (*WhereClause, error) {
-	condition, err := p.parseComparison()
+	criteria, err := p.parseComparison()
 	if err != nil {
 		return nil, err
 	}
@@ -420,10 +420,10 @@ func (p *Parser) parseWhere() (*WhereClause, error) {
 		}
 		next.Logic = logic
 
-		condition.Condition = append(condition.Condition, next)
+		criteria.Condition = append(criteria.Condition, next)
 	}
 
-	return condition, nil
+	return criteria, nil
 }
 
 // parseComparison "<kolom> <operator> <nilai>"

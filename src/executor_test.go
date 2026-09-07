@@ -278,7 +278,6 @@ func TestInsertSingleLeafOrdered(t *testing.T) {
 // 50
 
 // record 5 menyebabkan split
-
 //	                    Meta
 //	                RootPageID=3
 //	                     │
@@ -1490,10 +1489,9 @@ func validateNode(
 	}
 }
 
-
 // ---------------------------------------------------------------------------
 // Executor-level: memastikan Select benar-benar memfilter data nyata sesuai
-// Cons -- ini yang membuktikan evaluateWhereClause/evaluatePredicate jalan,
+// Criteria -- ini yang membuktikan evaluateWhereClause/evaluatePredicate jalan,
 // bukan cuma struct-nya benar dibentuk parser.
 // ---------------------------------------------------------------------------
 
@@ -1539,22 +1537,22 @@ func selectPKs(t *testing.T, executor *Executor, where *WhereClause) []int32 {
 	t.Helper()
 
 	res, err := executor.Select(SelectStatement{
-		DBName:  "testdb",
-		Table:   "users",
-		Columns: []string{"*"},
-		Cons:    where,
+		DBName:   "testdb",
+		Table:    "users",
+		Columns:  []string{"*"},
+		Criteria: where,
 	})
 	if err != nil {
 		t.Fatalf("select gagal: %v", err)
 	}
 
-	pks := make([]int32, len(res.Records))
+	var pks []int32
 	for i, rec := range res.Records {
 		pk, ok := rec[0].Value.(int32)
 		if !ok {
 			t.Fatalf("record %d: PK bukan int32: %v", i, rec[0].Value)
 		}
-		pks[i] = pk
+		pks = append(pks, pk)
 	}
 	return pks
 }
@@ -1672,10 +1670,10 @@ func TestSelectWhereBoolean(t *testing.T) {
 	assert.Equal(t, pks, []int32{1, 3})
 
 	_, err := executor.Select(SelectStatement{
-		DBName:  "testdb",
-		Table:   "users",
-		Columns: []string{"*"},
-		Cons:    &WhereClause{Key: "active", Op: OpGt, Val: "true"},
+		DBName:   "testdb",
+		Table:    "users",
+		Columns:  []string{"*"},
+		Criteria: &WhereClause{Key: "active", Op: OpGt, Val: "true"},
 	})
 	if !errors.Is(err, ErrInvalidDataType) {
 		t.Fatalf("expected ErrInvalidDataType untuk operator > terhadap BOOLEAN, got: %v", err)
@@ -1780,10 +1778,10 @@ func TestSelectWhereNullWithOrderOperatorRejected(t *testing.T) {
 	insertRows(t, executor, [][]string{{"1", "NULL"}})
 
 	_, err := executor.Select(SelectStatement{
-		DBName:  "testdb",
-		Table:   "users",
-		Columns: []string{"*"},
-		Cons:    &WhereClause{Key: "nickname", Op: OpGt, Val: "NULL"},
+		DBName:   "testdb",
+		Table:    "users",
+		Columns:  []string{"*"},
+		Criteria: &WhereClause{Key: "nickname", Op: OpGt, Val: "NULL"},
 	})
 	if !errors.Is(err, ErrInvalidDataType) {
 		t.Fatalf("expected ErrInvalidDataType untuk operator > terhadap NULL, got: %v", err)
@@ -1797,10 +1795,10 @@ func TestSelectWhereUnknownColumn(t *testing.T) {
 	insertRows(t, executor, [][]string{{"1", "andi"}})
 
 	_, err := executor.Select(SelectStatement{
-		DBName:  "testdb",
-		Table:   "users",
-		Columns: []string{"*"},
-		Cons:    &WhereClause{Key: "unknown_col", Op: OpEq, Val: "1"},
+		DBName:   "testdb",
+		Table:    "users",
+		Columns:  []string{"*"},
+		Criteria: &WhereClause{Key: "unknown_col", Op: OpEq, Val: "1"},
 	})
 	if !errors.Is(err, ErrColumnNotFound) {
 		t.Fatalf("expected ErrColumnNotFound, got: %v", err)

@@ -455,9 +455,39 @@ func (x *Executor) Select(stmt SelectStatement) (ResultSet, error) {
 		return ResultSet{}, err
 	}
 
-	records, err := scanTree(pager, rootPage, columns, stmt.Cons)
-	if err != nil {
-		return ResultSet{}, err
+	// Optimizer: putuskan strategi akses berdasarkan bentuk WHERE dan
+	// apakah kolomnya PK (satu-satunya B-tree yang ada saat ini). Lihat
+	// query_planner.go untuk aturan pemilihannya.
+	pkColumn, pkColIdx := primaryKeyColumn(columns)
+	plan := planQuery(stmt.Criteria, pkColumn)
+
+	var records []Record
+	switch plan.Method {
+	case AccessPKPointLookup:
+		leaf, err := x.targetPage(pager, rootPage, plan.Key)
+		if err != nil {
+			return ResultSet{}, err
+		}
+		records, err = pointLookupPK(leaf, columns, pkColIdx, plan.Key, plan.Criteria)
+		if err != nil {
+			return ResultSet{}, err
+		}
+
+	case AccessPKRangeScan:
+		startLeaf, err := x.targetPage(pager, rootPage, plan.Key)
+		if err != nil {
+			return ResultSet{}, err
+		}
+		records, err = rangeScanPKForward(pager, startLeaf, columns, plan.Criteria)
+		if err != nil {
+			return ResultSet{}, err
+		}
+
+	default: // AccessFullScan
+		records, err = scanTree(pager, rootPage, columns, plan.Criteria)
+		if err != nil {
+			return ResultSet{}, err
+		}
 	}
 
 	resultSet.Records = records

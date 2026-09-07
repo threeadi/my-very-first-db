@@ -43,14 +43,14 @@ func TestParseSelectWhereOperators(t *testing.T) {
 				t.Fatalf("expected SelectStatement, got %T", stmt)
 			}
 
-			if sel.Cons == nil {
-				t.Fatal("expected Cons terisi, got nil")
+			if sel.Criteria == nil {
+				t.Fatal("expected Criteria terisi, got nil")
 			}
-			if sel.Cons.Key != "id" || sel.Cons.Op != tc.wantOp || sel.Cons.Val != "1" {
-				t.Fatalf("unexpected condition: %+v", sel.Cons)
+			if sel.Criteria.Key != "id" || sel.Criteria.Op != tc.wantOp || sel.Criteria.Val != "1" {
+				t.Fatalf("unexpected condition: %+v", sel.Criteria)
 			}
-			if len(sel.Cons.Condition) != 0 {
-				t.Fatalf("expected tidak ada chain AND/OR, got: %+v", sel.Cons.Condition)
+			if len(sel.Criteria.Condition) != 0 {
+				t.Fatalf("expected tidak ada chain AND/OR, got: %+v", sel.Criteria.Condition)
 			}
 		})
 	}
@@ -76,8 +76,8 @@ func TestParseSelectWithoutWhere(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected SelectStatement, got %T", stmt)
 	}
-	if sel.Cons != nil {
-		t.Fatalf("expected Cons nil tanpa WHERE, got: %+v", sel.Cons)
+	if sel.Criteria != nil {
+		t.Fatalf("expected Criteria nil tanpa WHERE, got: %+v", sel.Criteria)
 	}
 }
 
@@ -118,22 +118,22 @@ func TestParseSelectWhereAndOr(t *testing.T) {
 		t.Fatalf("expected SelectStatement, got %T", stmt)
 	}
 
-	if sel.Cons == nil {
-		t.Fatal("expected Cons terisi")
+	if sel.Criteria == nil {
+		t.Fatal("expected Criteria terisi")
 	}
-	if sel.Cons.Key != "id" || sel.Cons.Op != OpEq || sel.Cons.Val != "1" {
-		t.Fatalf("predikat pertama salah: %+v", sel.Cons)
+	if sel.Criteria.Key != "id" || sel.Criteria.Op != OpEq || sel.Criteria.Val != "1" {
+		t.Fatalf("predikat pertama salah: %+v", sel.Criteria)
 	}
-	if len(sel.Cons.Condition) != 2 {
-		t.Fatalf("expected 2 predikat lanjutan, got %d: %+v", len(sel.Cons.Condition), sel.Cons.Condition)
+	if len(sel.Criteria.Condition) != 2 {
+		t.Fatalf("expected 2 predikat lanjutan, got %d: %+v", len(sel.Criteria.Condition), sel.Criteria.Condition)
 	}
 
-	second := sel.Cons.Condition[0]
+	second := sel.Criteria.Condition[0]
 	if second.Key != "name" || second.Op != OpEq || second.Val != "andi" || second.Logic != AND {
 		t.Fatalf("predikat kedua salah: %+v", second)
 	}
 
-	third := sel.Cons.Condition[1]
+	third := sel.Criteria.Condition[1]
 	if third.Key != "id" || third.Op != OpEq || third.Val != "3" || third.Logic != OR {
 		t.Fatalf("predikat ketiga salah: %+v", third)
 	}
