@@ -278,6 +278,7 @@ func TestInsertSingleLeafOrdered(t *testing.T) {
 // 50
 
 // record 5 menyebabkan split
+//
 //	                    Meta
 //	                RootPageID=3
 //	                     │
@@ -1680,7 +1681,7 @@ func TestSelectWhereBoolean(t *testing.T) {
 	}
 }
 
-// TestSelectWhereAnd menguji chain AND lewat WhereClause.Condition langsung
+// TestSelectWhereAnd menguji chain AND lewat WhereClause.Criteria langsung
 // (bypass parser) -- fokus ke evaluateWhereClause di executor.go.
 func TestSelectWhereAnd(t *testing.T) {
 	executor := setupWhereTestExecutor(t, basicUserColumns)
@@ -1695,7 +1696,7 @@ func TestSelectWhereAnd(t *testing.T) {
 	// id > 1 AND name = 'andi' -> hanya id=2
 	pks := selectPKs(t, executor, &WhereClause{
 		Key: "id", Op: OpGt, Val: "1",
-		Condition: []*WhereClause{
+		Criteria: []*WhereClause{
 			{Key: "name", Op: OpEq, Val: "andi", Logic: AND},
 		},
 	})
@@ -1715,7 +1716,7 @@ func TestSelectWhereOr(t *testing.T) {
 	// id = 1 OR id = 3
 	pks := selectPKs(t, executor, &WhereClause{
 		Key: "id", Op: OpEq, Val: "1",
-		Condition: []*WhereClause{
+		Criteria: []*WhereClause{
 			{Key: "id", Op: OpEq, Val: "3", Logic: OR},
 		},
 	})
@@ -1738,7 +1739,7 @@ func TestSelectWhereAndOrChainLeftToRight(t *testing.T) {
 	// id = 1 AND name = 'andi' OR id = 2
 	pks := selectPKs(t, executor, &WhereClause{
 		Key: "id", Op: OpEq, Val: "1",
-		Condition: []*WhereClause{
+		Criteria: []*WhereClause{
 			{Key: "name", Op: OpEq, Val: "andi", Logic: AND},
 			{Key: "id", Op: OpEq, Val: "2", Logic: OR},
 		},

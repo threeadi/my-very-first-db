@@ -92,11 +92,11 @@ const (
 )
 
 type WhereClause struct {
-	Key       string
-	Op        CompareOp
-	Val       any
-	Logic     LogicOp
-	Condition []*WhereClause
+	Key      string
+	Op       CompareOp
+	Val      any
+	Logic    LogicOp
+	Criteria []*WhereClause
 }
 
 type Sort struct {
@@ -420,7 +420,7 @@ func (p *Parser) parseWhere() (*WhereClause, error) {
 		}
 		next.Logic = logic
 
-		criteria.Condition = append(criteria.Condition, next)
+		criteria.Criteria = append(criteria.Criteria, next)
 	}
 
 	return criteria, nil

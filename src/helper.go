@@ -863,7 +863,7 @@ func evaluateWhereClause(record Record, columns []ColumnDef, wc *WhereClause) (b
 		return false, err
 	}
 
-	for _, next := range wc.Condition {
+	for _, next := range wc.Criteria {
 		nextResult, err := evaluateWhereClause(record, columns, next)
 		if err != nil {
 			return false, err
@@ -981,5 +981,3 @@ func compareOrdered[T int64 | float64 | string](a, b T, op CompareOp) (bool, err
 		return false, fmt.Errorf("%w: operator tidak dikenal", ErrInvalidDataType)
 	}
 }
-
-

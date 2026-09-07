@@ -75,7 +75,7 @@ func TestPlanQuery_AndOrChainFallsBackToFullScan(t *testing.T) {
 	// planner tidak mencoba push down -- lihat catatan di planQuery.
 	wc := &WhereClause{
 		Key: "id", Op: OpEq, Val: "1",
-		Condition: []*WhereClause{
+		Criteria: []*WhereClause{
 			{Key: "name", Op: OpEq, Val: "andi", Logic: AND},
 		},
 	}
@@ -146,10 +146,10 @@ func setupPlannerTestExecutor(t *testing.T, n int) *Executor {
 func planPKsOf(t *testing.T, executor *Executor, where *WhereClause) []int32 {
 	t.Helper()
 	res, err := executor.Select(SelectStatement{
-		DBName:  "testdb",
-		Table:   "users",
-		Columns: []string{"*"},
-		Criteria:    where,
+		DBName:   "testdb",
+		Table:    "users",
+		Columns:  []string{"*"},
+		Criteria: where,
 	})
 	if err != nil {
 		t.Fatalf("select gagal: %v", err)

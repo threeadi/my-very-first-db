@@ -27,7 +27,7 @@ func planQuery(wc *WhereClause, pkColumn string) QueryPlan {
 		Method:   AccessFullScan,
 		Criteria: wc,
 	}
-	if wc == nil || pkColumn == "" || len(wc.Condition) > 0 {
+	if wc == nil || pkColumn == "" || len(wc.Criteria) > 0 {
 		return qp
 	}
 	rawVal, ok := wc.Val.(string)

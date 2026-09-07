@@ -49,8 +49,8 @@ func TestParseSelectWhereOperators(t *testing.T) {
 			if sel.Criteria.Key != "id" || sel.Criteria.Op != tc.wantOp || sel.Criteria.Val != "1" {
 				t.Fatalf("unexpected condition: %+v", sel.Criteria)
 			}
-			if len(sel.Criteria.Condition) != 0 {
-				t.Fatalf("expected tidak ada chain AND/OR, got: %+v", sel.Criteria.Condition)
+			if len(sel.Criteria.Criteria) != 0 {
+				t.Fatalf("expected tidak ada chain AND/OR, got: %+v", sel.Criteria.Criteria)
 			}
 		})
 	}
@@ -124,16 +124,16 @@ func TestParseSelectWhereAndOr(t *testing.T) {
 	if sel.Criteria.Key != "id" || sel.Criteria.Op != OpEq || sel.Criteria.Val != "1" {
 		t.Fatalf("predikat pertama salah: %+v", sel.Criteria)
 	}
-	if len(sel.Criteria.Condition) != 2 {
-		t.Fatalf("expected 2 predikat lanjutan, got %d: %+v", len(sel.Criteria.Condition), sel.Criteria.Condition)
+	if len(sel.Criteria.Criteria) != 2 {
+		t.Fatalf("expected 2 predikat lanjutan, got %d: %+v", len(sel.Criteria.Criteria), sel.Criteria.Criteria)
 	}
 
-	second := sel.Criteria.Condition[0]
+	second := sel.Criteria.Criteria[0]
 	if second.Key != "name" || second.Op != OpEq || second.Val != "andi" || second.Logic != AND {
 		t.Fatalf("predikat kedua salah: %+v", second)
 	}
 
-	third := sel.Criteria.Condition[1]
+	third := sel.Criteria.Criteria[1]
 	if third.Key != "id" || third.Op != OpEq || third.Val != "3" || third.Logic != OR {
 		t.Fatalf("predikat ketiga salah: %+v", third)
 	}
