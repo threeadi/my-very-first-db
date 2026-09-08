@@ -129,7 +129,7 @@ func pointLookupPK(leaf *Page, columns []ColumnDef, pkColIdx int, key int32, cri
 
 	offset := head.FirstRecordOffset
 	for offset != 0 {
-		record, _, nextOffset, _, err := decodeRecord(columns, leaf.Data[offset:], needed)
+		record, flags, nextOffset, _, err := decodeRecord(columns, leaf.Data[offset:], needed)
 		if err != nil {
 			return nil, err
 		}
@@ -140,6 +140,10 @@ func pointLookupPK(leaf *Page, columns []ColumnDef, pkColIdx int, key int32, cri
 		}
 
 		if pk == key {
+			if isDeleted(flags) {
+				offset = nextOffset
+				continue
+			}
 			match, err := evaluateWhereClause(record, columns, criteria)
 			if err != nil {
 				return nil, err
@@ -177,9 +181,14 @@ func rangeScanPKForward(pager *Pager, startLeaf *Page, columns []ColumnDef, crit
 
 		offset := head.FirstRecordOffset
 		for offset != 0 {
-			record, _, nextOffset, _, err := decodeRecord(columns, leaf.Data[offset:], needed)
+			record, flags, nextOffset, _, err := decodeRecord(columns, leaf.Data[offset:], needed)
 			if err != nil {
 				return nil, err
+			}
+
+			if isDeleted(flags) {
+				offset = nextOffset
+				continue
 			}
 
 			if matchedOnce {

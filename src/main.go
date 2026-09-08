@@ -127,6 +127,13 @@ func main() {
 				continue
 			}
 			printResultSet(result)
+		case DeleteStatement:
+			deletedCount, deleteErr := executor.Delete(stmt)
+			if deleteErr != nil {
+				log.Default().Println("error delete:", deleteErr)
+				continue
+			}
+			log.Default().Printf("delete %d row(s) success\n", deletedCount)
 
 		default:
 			log.Default().Printf("unsupported statement type %T\n", statement)

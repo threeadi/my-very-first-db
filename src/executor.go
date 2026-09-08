@@ -339,7 +339,7 @@ func (x *Executor) Insert(stmt InsertStatement) error {
 	var prevOffset uint16
 	currentOffset := head.FirstRecordOffset
 	for currentOffset != 0 {
-		record, _, nextOffset, _, err := decodeRecord(columns, page.Data[currentOffset:], nil)
+		record, flags, nextOffset, _, err := decodeRecord(columns, page.Data[currentOffset:], nil)
 		if err != nil {
 			return err
 		}
@@ -349,6 +349,11 @@ func (x *Executor) Insert(stmt InsertStatement) error {
 		}
 
 		if newPK == currentPK {
+			if isDeleted(flags) {
+				prevOffset = currentOffset
+				currentOffset = nextOffset
+				continue
+			}
 			return fmt.Errorf("duplicate primary key: %d", newPK)
 		}
 		if newPK < currentPK {
@@ -542,9 +547,14 @@ func scanLeaf(page *Page, columns []ColumnDef, wc *WhereClause, needed []bool) (
 	var records []Record
 
 	for recordOffset != 0 {
-		record, _, nextOffset, _, err := decodeRecord(columns, page.Data[recordOffset:], needed)
+		record, flags, nextOffset, _, err := decodeRecord(columns, page.Data[recordOffset:], needed)
 		if err != nil {
 			return nil, err
+		}
+
+		if isDeleted(flags) {
+			recordOffset = nextOffset
+			continue
 		}
 
 		match, err := evaluateWhereClause(record, columns, wc)
@@ -598,6 +608,153 @@ func scanLeafChain(
 	}
 
 	return records, nil
+}
+
+func (x *Executor) Delete(stmt DeleteStatement) (int, error) {
+	if stmt.DBName == "" {
+		return 0, ErrNoDatabaseSelected
+	}
+
+	if !x.catalog.TableExists(stmt.DBName, stmt.Table) {
+		return 0, fmt.Errorf(
+			"%w : table %s",
+			ErrTableNotFound,
+			stmt.Table,
+		)
+	}
+
+	columns, err := x.catalog.GetTableColumns(
+		stmt.DBName,
+		stmt.Table,
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	pager, exists := x.pagers[stmt.Table]
+	if !exists {
+		filePath := filepath.Join(
+			x.config.DataDirectory,
+			fmt.Sprintf("/%s/%s.3tbl", stmt.DBName, stmt.Table),
+		)
+
+		pager, err = OpenPager(filePath)
+		if err != nil {
+			return 0, err
+		}
+	}
+
+	metaRaw, err := pager.ReadPage(0)
+	if err != nil {
+		return 0, err
+	}
+
+	meta, err := DecodeMetaPage(metaRaw)
+	if err != nil {
+		return 0, err
+	}
+
+	rootPage, err := pager.ReadPage(meta.RootPageID)
+	if err != nil {
+		return 0, err
+	}
+
+	pkColumn, pkColIdx := primaryKeyColumn(columns)
+
+	plan := planQuery(stmt.Criteria, pkColumn)
+
+	switch plan.Method {
+	case AccessPKPointLookup:
+		leaf, err := x.targetPage(pager, rootPage, plan.Key)
+		if err != nil {
+			return 0, err
+		}
+
+		return deletePKPointLookup(
+			pager,
+			leaf,
+			columns,
+			pkColIdx,
+			plan.Key,
+			plan.Criteria,
+		)
+
+	default:
+		return deleteTree(
+			pager,
+			rootPage,
+			columns,
+			stmt.Criteria,
+		)
+	}
+}
+
+// deleteTree turun dari root ke leaf paling kiri (pola sama dengan
+// scanTree), lalu delegasi ke deleteLeafChain untuk berjalan lewat NextLeaf
+// sampai leaf terakhir.
+func deleteTree(pager *Pager, page *Page, columns []ColumnDef, wc *WhereClause) (int, error) {
+	head, err := DecodeIndexPageHeader(page)
+	if err != nil {
+		return 0, err
+	}
+
+	switch head.PageType {
+	case PageTypeLeaf:
+		return deleteLeafChain(pager, page, columns, wc)
+
+	case PageTypeInternal:
+		firstPageID, _, err := readInternalCells(page)
+		if err != nil {
+			return 0, err
+		}
+
+		firstPage, err := pager.ReadPage(firstPageID)
+		if err != nil {
+			return 0, err
+		}
+
+		return deleteTree(pager, firstPage, columns, wc)
+
+	default:
+		return 0, ErrCorruptTableFile
+	}
+}
+
+func deleteLeafChain(pager *Pager, page *Page, columns []ColumnDef, wc *WhereClause) (int, error) {
+	total := 0
+
+	for {
+		head, err := DecodeIndexPageHeader(page)
+		if err != nil {
+			return total, err
+		}
+		if head.PageType != PageTypeLeaf {
+			return total, ErrCorruptTableFile
+		}
+
+		matched, changed, err := markLeafDeleted(page, columns, wc)
+		if err != nil {
+			return total, err
+		}
+		total += matched
+
+		if changed {
+			if err := pager.WritePage(page); err != nil {
+				return total, err
+			}
+		}
+
+		if head.NextLeaf == InvalidPageID {
+			break
+		}
+
+		page, err = pager.ReadPage(head.NextLeaf)
+		if err != nil {
+			return total, err
+		}
+	}
+
+	return total, nil
 }
 
 func splitInternalPage(

@@ -751,6 +751,52 @@ func DecodeIndexPageHeader(page *Page) (IndexPageHeader, error) {
 	return h, nil
 }
 
+const flagDeleted uint8 = 1 << 0
+
+func isDeleted(flags uint8) bool {
+	return flags&flagDeleted != 0
+}
+
+func flagsBytePosition(columns []ColumnDef) int {
+	return recordNextOffsetPosition(columns) - 1
+}
+
+func markLeafDeleted(page *Page, columns []ColumnDef, wc *WhereClause) (matched int, changed bool, err error) {
+	head, err := DecodeIndexPageHeader(page)
+	if err != nil {
+		return 0, false, err
+	}
+	if head.PageType != PageTypeLeaf {
+		return 0, false, ErrCorruptTableFile
+	}
+
+	flagsPos := flagsBytePosition(columns)
+	offset := head.FirstRecordOffset
+
+	for offset != 0 {
+		record, flags, nextOffset, _, err := decodeRecord(columns, page.Data[offset:], nil)
+		if err != nil {
+			return matched, changed, err
+		}
+
+		if !isDeleted(flags) {
+			match, err := evaluateWhereClause(record, columns, wc)
+			if err != nil {
+				return matched, changed, err
+			}
+			if match {
+				page.Data[int(offset)+flagsPos] |= flagDeleted
+				matched++
+				changed = true
+			}
+		}
+
+		offset = nextOffset
+	}
+
+	return matched, changed, nil
+}
+
 func recordNextOffsetPosition(columns []ColumnDef) int {
 	var varcharCount int
 	var nullableCount int
@@ -931,4 +977,70 @@ func compareOrdered[T int64 | float64 | string](a, b T, op CompareOp) (bool, err
 	default:
 		return false, fmt.Errorf("%w: operator tidak dikenal", ErrInvalidDataType)
 	}
+}
+
+func deletePKPointLookup(
+	pager *Pager,
+	leaf *Page,
+	columns []ColumnDef,
+	pkColIdx int,
+	key int32,
+	wc *WhereClause,
+) (int, error) {
+	head, err := DecodeIndexPageHeader(leaf)
+	if err != nil {
+		return 0, err
+	}
+
+	if head.PageType != PageTypeLeaf {
+		return 0, ErrCorruptTableFile
+	}
+
+	flagsPos := flagsBytePosition(columns)
+	offset := head.FirstRecordOffset
+
+	for offset != 0 {
+		record, flags, nextOffset, _, err :=
+			decodeRecord(columns, leaf.Data[offset:], nil)
+		if err != nil {
+			return 0, err
+		}
+
+		pk, ok := record[pkColIdx].Value.(int32)
+		if !ok {
+			return 0, ErrInvalidDataType
+		}
+
+		if pk > key {
+			break
+		}
+
+		if pk == key {
+			if isDeleted(flags) {
+				offset = nextOffset
+				continue
+			}
+
+			match, err := evaluateWhereClause(record, columns, wc)
+			if err != nil {
+				return 0, err
+			}
+
+			if !match {
+				return 0, nil
+			}
+
+			leaf.Data[int(offset)+flagsPos] |= flagDeleted
+
+			if err := pager.WritePage(leaf); err != nil {
+				return 0, err
+			}
+
+			return 1, nil
+		}
+
+		offset = nextOffset
+	}
+
+	return 0, nil
 }

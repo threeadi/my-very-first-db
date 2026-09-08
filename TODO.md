@@ -133,7 +133,7 @@ Jangan menyentuh penyimpanan disk dahulu.
 - [x] Parser mendukung `INSERT`.
 - [x] Parser mendukung `SELECT` dan daftar kolom.
 - [ ] Parser mendukung `UPDATE`.
-- [ ] Parser mendukung `DELETE`.
+- [x] Parser mendukung `DELETE`.
 - [ ] Parser mendukung filter perbandingan sederhana.
 - [ ] Parser mendukung `SUM`, `GROUP BY`, dan `ORDER BY`.
 - [ ] Parser mendukung pembuatan index biasa dan unik.
@@ -159,7 +159,7 @@ Storage dasar sekarang sudah memakai page tetap 4096 byte dan menjadi fondasi cl
 - [x] Persistence manual: row tetap identik setelah program ditutup dan dibuka kembali.
 - [ ] Validasi magic number, version, page type, dan boundary record secara ketat saat read/open.
 - [ ] Tambahkan automated round-trip/restart test untuk seluruh tipe data dan NULL.
-- [ ] Tombstone/delete-mark belum dipakai oleh DELETE.
+- [x] Tombstone/delete-mark belum dipakai oleh DELETE.
 
 **Lulus jika:** sekumpulan row yang ditulis dapat dibaca kembali dengan nilai identik setelah restart.
 
@@ -177,7 +177,7 @@ Target ini sengaja ditempatkan setelah storage dasar karena clustered tree **ada
 - [x] Leaf sudah menyimpan full row; format internal node sudah diimplementasikan (`InternalCell`, `readInternalCells`, `rewriteInternal`).
 - [x] Semua leaf berada pada depth yang sama dan terhubung dengan `next_leaf` untuk sequential/range scan.
 - [x] Gunakan invariant separator: setiap separator adalah key terkecil pada child di sebelah kanan. — Ditegakkan di `targetPage()` dan `splitLeaf()`/`splitRootInternal()`.
-- [ ] Tidak perlu merge/rebalance saat delete pada versi pertama; tandai deleted atau compact satu leaf, tetapi tree harus tetap searchable.
+- [x] Tidak perlu merge/rebalance saat delete pada versi pertama; tandai deleted atau compact satu leaf, tetapi tree harus tetap searchable.
 
 ### Blocker / hardening sebelum split
 
@@ -235,7 +235,7 @@ Target ini sengaja ditempatkan setelah storage dasar karena clustered tree **ada
 - [ ] Implementasikan `SELECT ... WHERE pk = value` melalui clustered lookup.
 - [ ] Implementasikan `UPDATE` non-PK; bila ukuran row tidak lagi muat, lakukan delete + reinsert.
 - [ ] Implementasikan perubahan PK sebagai delete old key + insert new key.
-- [ ] Implementasikan delete sederhana tanpa merge terlebih dahulu.
+- [x] Implementasikan delete sederhana tanpa merge terlebih dahulu.
 
 ### Test wajib sebelum integrasi SQL penuh
 
@@ -261,9 +261,9 @@ Catalog adalah sumber kebenaran metadata, bukan isi direktori yang ditebak-tebak
 - [x] Catalog mencatat urutan, nama, tipe, nullable, dan default setiap kolom.
 - [ ] Catalog mencatat index, kolom target, jenis biasa/unik, dan file index.
 - [~] Implementasikan create database. — Sudah ada, tetapi path masih dikonkatenasi langsung, mkdir masih hard-coded, dan error dapat menghentikan proses.
-- [ ] Implementasikan drop database dengan pemeriksaan target yang ketat.
+- [x] Implementasikan drop database dengan pemeriksaan target yang ketat.
 - [~] Implementasikan create table. — Meta page + root leaf + catalog sudah dibuat; operasi belum atomic dan belum rollback jika catalog save gagal.
-- [ ] Implementasikan drop table beserta metadata index miliknya.
+- [x] Implementasikan drop table beserta metadata index miliknya.
 - [ ] Perubahan metadata dilakukan secara aman (write ke file sementara lalu `os.Rename`) agar file setengah tertulis tidak dianggap valid.
 - [~] Uji catalog setelah restart. — `LoadCatalog` ada; automated restart test belum.
 
@@ -313,10 +313,10 @@ Kerjakan satu demi satu; jangan menggabungkan semuanya sekaligus.
 
 ### DELETE
 
-- [ ] Sequential scan dan filter target.
-- [ ] Tandai record terhapus.
-- [ ] Pastikan scan berikutnya mengabaikan tombstone.
-- [ ] Kembalikan jumlah row yang terhapus.
+- [x] Sequential scan dan filter target.
+- [x] Tandai record terhapus.
+- [x] Pastikan scan berikutnya mengabaikan tombstone.
+- [x] Kembalikan jumlah row yang terhapus.
 
 **Lulus jika:** seluruh CRUD benar untuk tabel kosong, satu row, banyak row, tanpa filter, dan dengan filter.
 

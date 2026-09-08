@@ -115,6 +115,14 @@ type InsertStatement struct {
 
 func (InsertStatement) statementNode() {}
 
+type DeleteStatement struct {
+	DBName   string
+	Table    string
+	Criteria *WhereClause
+}
+
+func (DeleteStatement) statementNode() {}
+
 func NewParser(tokens []Token) Parser {
 	return Parser{
 		Tokens: tokens,
@@ -130,16 +138,24 @@ func (p *Parser) Parse() (Statement, error) {
 		return nil, ErrInvalidStatement
 	}
 
+	var stmt Statement
+	var err error
+
 	switch p.Tokens[0].Literal {
 	case "drop":
+		if len(p.Tokens) < 2 {
+			return nil, ErrUnexpectedEOF
+		}
+
 		switch p.Tokens[1].Literal {
 		case "database":
-			return p.parseDropDB()
+			stmt, err = p.parseDropDB()
 		case "table":
-			return p.parseDropTable()
+			stmt, err = p.parseDropTable()
 		default:
 			return nil, fmt.Errorf("%w: DROP %s", ErrInvalidStatement, p.Tokens[1].Literal)
 		}
+
 	case "create":
 		if len(p.Tokens) < 2 {
 			return nil, ErrUnexpectedEOF
@@ -147,22 +163,43 @@ func (p *Parser) Parse() (Statement, error) {
 
 		switch p.Tokens[1].Literal {
 		case "database":
-			return p.parseCreateDB()
+			stmt, err = p.parseCreateDB()
 		case "table":
-			return p.parseCreateTable()
+			stmt, err = p.parseCreateTable()
 		default:
 			return nil, fmt.Errorf("%w: CREATE %s", ErrInvalidStatement, p.Tokens[1].Literal)
 		}
 
 	case "select":
-		return p.parseSelect()
+		stmt, err = p.parseSelect()
 
 	case "insert":
-		return p.parseInsert()
+		stmt, err = p.parseInsert()
+
+	case "delete":
+		stmt, err = p.parseDelete()
 
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrInvalidStatement, p.Tokens[0].Literal)
 	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	for p.pos < len(p.Tokens) && p.Tokens[p.pos].Type == DELIMITER {
+		p.pos++
+	}
+
+	if p.pos < len(p.Tokens) {
+		return nil, fmt.Errorf(
+			"%w: token tidak terduga setelah statement: %s",
+			ErrInvalidStatement,
+			p.Tokens[p.pos].Literal,
+		)
+	}
+
+	return stmt, nil
 }
 
 func (p *Parser) parseCreateDB() (Statement, error) {
@@ -579,6 +616,46 @@ func (p *Parser) parseInsert() (Statement, error) {
 		Columns: columns,
 		Values:  values,
 	}, nil
+}
+
+// parseDelete "DELETE FROM <table> [WHERE ...]" -- reuse parseWhere() yang
+// sama persis dipakai parseSelect, supaya semantik AND/OR dan operator
+// perbandingan konsisten di seluruh statement yang punya WHERE.
+func (p *Parser) parseDelete() (Statement, error) {
+	p.pos++ // lewati DELETE
+	if p.pos >= len(p.Tokens) {
+		return nil, fmt.Errorf("%w: diharapkan FROM", ErrUnexpectedEOF)
+	}
+	if p.Tokens[p.pos].Type != KEYWORD || p.Tokens[p.pos].Literal != "from" {
+		return nil, fmt.Errorf("%w: diharapkan FROM, tapi dapat: %s", ErrInvalidStatement, p.Tokens[p.pos].Literal)
+	}
+
+	p.pos++
+	if p.pos >= len(p.Tokens) {
+		return nil, fmt.Errorf("%w: diharapkan nama table", ErrUnexpectedEOF)
+	}
+	if p.Tokens[p.pos].Type != IDENT {
+		return nil, fmt.Errorf("%w: diharapkan nama table, tapi dapat: %s", ErrInvalidStatement, p.Tokens[p.pos].Literal)
+	}
+
+	table := p.Tokens[p.pos].Literal
+	p.pos++
+
+	stmt := DeleteStatement{
+		DBName: currentDatabase,
+		Table:  table,
+	}
+
+	if p.pos < len(p.Tokens) && p.Tokens[p.pos].Type == KEYWORD && p.Tokens[p.pos].Literal == "where" {
+		p.pos++
+		criteria, err := p.parseWhere()
+		if err != nil {
+			return nil, err
+		}
+		stmt.Criteria = criteria
+	}
+
+	return stmt, nil
 }
 
 func (p *Parser) parseDropDB() (Statement, error) {
